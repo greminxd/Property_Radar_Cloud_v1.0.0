@@ -239,7 +239,7 @@ async function listForBot(env, mode) {
 
 async function dispatchScan(env) {
   if (!env.GITHUB_DISPATCH_TOKEN || !env.GITHUB_REPO || env.GITHUB_REPO.includes('PUT_')) {
-    return { ok: false, message: 'Brak GITHUB_DISPATCH_TOKEN / GITHUB_REPO w Workerze.' };
+    return { ok: false, code: 'github_dispatch_not_configured', message: 'Worker nie ma GITHUB_DISPATCH_TOKEN albo GITHUB_REPO. Dodaj GITHUB_DISPATCH_TOKEN jako Secret w Cloudflare Workerze.' };
   }
   const r = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/scan.yml/dispatches`, {
     method: 'POST',
@@ -288,7 +288,18 @@ async function handleTelegram(req, env) {
 user_id: <code>${escapeHtml(userId)}</code>`, { inline_keyboard: [] });
     return new Response('ok');
   }
-  if (!role) return new Response('ok');
+  if (!role) {
+    await send(`⛔ Brak dostępu.\nTwój user_id: <code>${escapeHtml(userId)}</code>\nDodaj ten numer w Cloudflare do <code>TELEGRAM_ADMINS</code> albo <code>TELEGRAM_USERS</code>.`, { inline_keyboard: [] });
+    return new Response('ok');
+  }
+
+  if (!callback && incomingText === '/diag') {
+    let db = 'OK';
+    try { await env.DB.prepare('SELECT 1 AS ok').first(); } catch (e) { db = 'BŁĄD: ' + String(e?.message || e); }
+    const gh = !!(env.GITHUB_DISPATCH_TOKEN && env.GITHUB_REPO && !String(env.GITHUB_REPO).includes('PUT_'));
+    await send(`🧪 <b>DIAGNOSTYKA</b>\nuser_id: <code>${escapeHtml(userId)}</code>\nrola: <b>${escapeHtml(role || 'BRAK')}</b>\nD1: <b>${escapeHtml(db)}</b>\nGitHub scan trigger: <b>${gh ? 'OK' : 'BRAK GITHUB_DISPATCH_TOKEN'}</b>\nWebhook secret: <b>${env.TELEGRAM_WEBHOOK_SECRET ? 'OK' : 'BRAK'}</b>`, { inline_keyboard: [] });
+    return new Response('ok');
+  }
 
   if (callback) {
     try { await telegramApi(env, 'answerCallbackQuery', { callback_query_id: callback.id }); } catch {}

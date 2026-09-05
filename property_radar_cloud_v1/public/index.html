@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="robots" content="noindex,nofollow,noarchive" />
+  <meta name="theme-color" content="#0b1118" />
+  <title>Property Radar</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div id="login" class="login-shell hidden">
+    <form id="loginForm" class="login-card">
+      <div class="logo">🏡</div>
+      <h1>Property Radar</h1>
+      <p>Prywatny panel ofert — Zdonia / Zakliczyn / Słona + bliskie okolice.</p>
+      <label>Hasło</label>
+      <input id="password" type="password" autocomplete="current-password" placeholder="••••••••••••" required />
+      <button type="submit" class="primary">Zaloguj</button>
+      <div id="loginError" class="error"></div>
+    </form>
+  </div>
+
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-icon">🏡</div>
+        <div><strong>Property Radar</strong><span>Zdonia · Zakliczyn · Słona + bliskie okolice</span></div>
+      </div>
+      <div class="top-actions">
+        <button id="scanBtn" class="ghost" title="Uruchom skan">↻ Skanuj</button>
+        <button id="logoutBtn" class="ghost" title="Wyloguj">Wyloguj</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-main">
+          <span class="eyebrow">RYNEK W TWOJEJ STREFIE</span>
+          <div class="market-line"><span id="marketMedian">—</span><small>mediana ceny działek / m²</small></div>
+          <div id="lastScan" class="muted">Ostatni skan: —</div>
+        </div>
+        <div class="stats-grid">
+          <div class="stat"><b id="statTotal">0</b><span>ofert</span></div>
+          <div class="stat"><b id="statDeals">0</b><span>okazji</span></div>
+          <div class="stat"><b id="statPrivate">0</b><span>prywatne 8+</span></div>
+          <div class="stat"><b id="statPhone">0</b><span>z telefonem</span></div>
+        </div>
+      </section>
+
+      <section class="toolbar">
+        <div class="searchbox"><span>⌕</span><input id="search" placeholder="Miejscowość, nr działki, WZ, telefon, opis…" /></div>
+        <button id="filtersBtn" class="primary compact">Filtry <span id="filterCount" class="filter-count">0</span></button>
+      </section>
+
+      <section class="quick" id="quickFilters">
+        <button class="pill active" data-quick="all">Wszystkie</button>
+        <button class="pill" data-quick="new">🆕 Nowe</button>
+        <button class="pill" data-quick="deal">🔥 Okazje</button>
+        <button class="pill" data-quick="private">🌲 Prywatne</button>
+        <button class="pill" data-quick="large">📐 Duże 1500+</button>
+        <button class="pill" data-quick="garage">🚗 Garaże</button>
+      </section>
+
+      <section class="result-head">
+        <div><b id="resultCount">0</b> wyników</div>
+        <select id="sort">
+          <option value="new">najnowsze znalezione</option>
+          <option value="published">najnowsze ogłoszenia</option>
+          <option value="distance">najbliżej</option>
+          <option value="priceAsc">cena: rosnąco</option>
+          <option value="priceDesc">cena: malejąco</option>
+          <option value="ppm">cena/m²: rosnąco</option>
+          <option value="areaDesc">powierzchnia: malejąco</option>
+          <option value="privacy">prywatność</option>
+        </select>
+      </section>
+
+      <section id="cards" class="cards"></section>
+    </main>
+
+    <aside id="filters" class="drawer" aria-hidden="true">
+      <div class="drawer-head"><div><strong>Filtry</strong><span>Możesz zaznaczyć kilka naraz</span></div><button id="filtersClose" class="icon-btn">×</button></div>
+      <div class="drawer-body">
+        <div class="filter-section"><h3>Rodzaj</h3><div id="categoryFilters" class="check-grid"></div></div>
+        <div class="filter-section"><h3>Typ działki</h3><div id="typeFilters" class="check-grid"></div></div>
+        <div class="filter-section"><h3>Plan / możliwość zabudowy</h3><div id="planningFilters" class="check-grid"></div></div>
+        <div class="filter-section"><h3>Miejscowość</h3><div id="localityFilters" class="check-grid"></div></div>
+        <div class="filter-section two-cols">
+          <div><h3>Powierzchnia od</h3><input id="minArea" type="number" min="0" placeholder="np. 1500" /></div>
+          <div><h3>Powierzchnia do</h3><input id="maxArea" type="number" min="0" placeholder="bez limitu" /></div>
+          <div><h3>Cena do</h3><input id="maxPrice" type="number" min="0" placeholder="np. 250000" /></div>
+          <div><h3>zł/m² do</h3><input id="maxPpm" type="number" min="0" step="0.01" placeholder="np. 60" /></div>
+        </div>
+        <div class="filter-section"><label class="toggle-row"><input id="onlyPhone" type="checkbox"/><span>Tylko z telefonem</span></label><label class="toggle-row"><input id="onlyParcel" type="checkbox"/><span>Tylko z numerem działki</span></label></div>
+      </div>
+      <div class="drawer-foot"><button id="clearFilters" class="ghost">Wyczyść</button><button id="applyFilters" class="primary">Pokaż wyniki</button></div>
+    </aside>
+    <div id="backdrop" class="backdrop hidden"></div>
+
+    <dialog id="detailDialog" class="detail-dialog">
+      <button id="detailClose" class="detail-close">×</button>
+      <div id="detailBody"></div>
+    </dialog>
+
+    <div id="toast" class="toast"></div>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

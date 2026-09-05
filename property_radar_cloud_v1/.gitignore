@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+.dev.vars
+.env
+*.sqlite3
+__pycache__/
+*.pyc
+logs/*.json
+logs/*.txt

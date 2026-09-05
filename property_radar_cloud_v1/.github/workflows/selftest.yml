@@ -1,0 +1,20 @@
+name: Selftest
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install beautifulsoup4==4.13.4 lxml==6.0.1 requests==2.32.5
+      - run: python scraper/selftest.py
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - run: node --check src/index.js

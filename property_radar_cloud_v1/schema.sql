@@ -1,0 +1,80 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS listings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  canonical_url TEXT NOT NULL UNIQUE,
+  source TEXT NOT NULL,
+  fingerprint TEXT,
+  category TEXT,
+  title TEXT,
+  price REAL,
+  area_m2 REAL,
+  price_m2 REAL,
+  plot_type TEXT,
+  planning_status TEXT,
+  location TEXT,
+  lat REAL,
+  lon REAL,
+  distance_km REAL,
+  phone TEXT,
+  parcel_number TEXT,
+  published_text TEXT,
+  published_at TEXT,
+  area_warning TEXT,
+  image_url TEXT,
+  location_confidence TEXT,
+  area_locality TEXT,
+  area_confidence TEXT,
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  missing_scans INTEGER NOT NULL DEFAULT 0,
+  privacy_score INTEGER,
+  privacy_reasons TEXT,
+  deal_label TEXT,
+  median_comparable REAL,
+  comparable_count INTEGER DEFAULT 0,
+  comparison_quality TEXT,
+  description TEXT
+);
+
+CREATE TABLE IF NOT EXISTS price_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  listing_id INTEGER NOT NULL,
+  seen_at TEXT NOT NULL,
+  price REAL NOT NULL,
+  FOREIGN KEY(listing_id) REFERENCES listings(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS geocode_cache (
+  query TEXT PRIMARY KEY,
+  lat REAL,
+  lon REAL,
+  display_name TEXT,
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS scan_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  downloaded_records INTEGER DEFAULT 0,
+  accepted_records INTEGER DEFAULT 0,
+  active_after_scan INTEGER DEFAULT 0,
+  new_count INTEGER DEFAULT 0,
+  price_change_count INTEGER DEFAULT 0,
+  rejected_count INTEGER DEFAULT 0,
+  deactivated_count INTEGER DEFAULT 0,
+  healthy_sources INTEGER DEFAULT 0,
+  total_sources INTEGER DEFAULT 0,
+  diagnostics_json TEXT,
+  status TEXT DEFAULT 'ok'
+);
+
+CREATE INDEX IF NOT EXISTS idx_listings_active ON listings(active);
+CREATE INDEX IF NOT EXISTS idx_listings_fp ON listings(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_listings_last_seen ON listings(last_seen);
+CREATE INDEX IF NOT EXISTS idx_listings_location ON listings(area_locality);
+CREATE INDEX IF NOT EXISTS idx_listings_type ON listings(plot_type);
+CREATE INDEX IF NOT EXISTS idx_price_history_listing ON price_history(listing_id, seen_at);
+CREATE INDEX IF NOT EXISTS idx_scan_runs_finished ON scan_runs(finished_at);

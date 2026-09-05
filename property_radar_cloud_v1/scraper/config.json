@@ -1,0 +1,200 @@
+{
+  "center": {
+    "name": "Bieśnik",
+    "lat": 49.82625,
+    "lon": 20.8099,
+    "radius_km": 10.0
+  },
+  "browser": {
+    "headless": true,
+    "timeout_ms": 30000,
+    "delay_between_pages_s": 0.45,
+    "max_detail_pages_per_source": 80,
+    "max_search_pages_per_url": 3,
+    "scroll_rounds": 3,
+    "parallel_sources": 3
+  },
+  "filters": {
+    "categories": [
+      "plot",
+      "garage"
+    ]
+  },
+  "retention": {
+    "missing_scans_before_inactive": 3
+  },
+  "telegram": {
+    "first_run_top_n": 10,
+    "send_summary_even_if_nothing_new": true
+  },
+  "scoring": {
+    "minimum_comparables_for_deal_score": 3,
+    "deal_thresholds": {
+      "mega": 0.65,
+      "deal": 0.8,
+      "good": 0.95,
+      "market": 1.1,
+      "expensive": 1.4
+    }
+  },
+  "area": {
+    "mode": "locality_whitelist",
+    "label": "Zdonia / Zakliczyn / Słona + bliskie okolice",
+    "primary_localities": [
+      "Zdonia",
+      "Zakliczyn",
+      "Słona"
+    ],
+    "nearby_localities": [
+      "Bieśnik",
+      "Kończyska",
+      "Olszowa",
+      "Paleśnica",
+      "Lusławice",
+      "Wesołów"
+    ],
+    "fallback_radius_km": 5.0,
+    "reject_unknown_location": true,
+    "known_gmina_localities": [
+      "Bieśnik",
+      "Borowa",
+      "Charzewice",
+      "Dzierżaniny",
+      "Faliszewice",
+      "Faściszowa",
+      "Filipowice",
+      "Gwoździec",
+      "Jamna",
+      "Kończyska",
+      "Lusławice",
+      "Melsztyn",
+      "Olszowa",
+      "Paleśnica",
+      "Roztoka",
+      "Ruda Kameralna",
+      "Słona",
+      "Stróże",
+      "Wesołów",
+      "Wola Stróska",
+      "Wróblowice",
+      "Zakliczyn",
+      "Zawada Lanckorońska",
+      "Zdonia"
+    ],
+    "known_outside_localities": [
+      "Milówka",
+      "Złota",
+      "Siemiechów",
+      "Jastrzębia",
+      "Gromnik",
+      "Wojnicz",
+      "Czchów",
+      "Domosławice"
+    ]
+  },
+  "sources": [
+    {
+      "name": "Otodom",
+      "enabled": true,
+      "search_urls": [
+        "https://www.otodom.pl/pl/wyniki/sprzedaz/dzialka/malopolskie/tarnowski/zakliczyn/biesnik?ownerTypeSingleSelect=ALL&distanceRadius=10",
+        "https://www.otodom.pl/pl/wyniki/sprzedaz/garaz/malopolskie/tarnowski/zakliczyn/biesnik?ownerTypeSingleSelect=ALL&distanceRadius=10"
+      ],
+      "detail_regex": "https?://(?:www\\.)?otodom\\.pl/pl/oferta/[^?#]+"
+    },
+    {
+      "name": "OLX",
+      "enabled": true,
+      "search_urls": [
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/zakliczyn/",
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zdonia/",
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-slona/",
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-palesnica/",
+        "https://www.olx.pl/nieruchomosci/garaze-parkingi/sprzedaz/zakliczyn/"
+      ],
+      "detail_regex": "https?://(?:www\\.)?olx\\.pl/d/oferta/[^?#]+"
+    },
+    {
+      "name": "Morizon",
+      "enabled": true,
+      "search_urls": [
+        "https://www.morizon.pl/dzialki/tarnowski/zakliczyn/",
+        "https://www.morizon.pl/garaze/tarnowski/zakliczyn/"
+      ],
+      "detail_regex": "https?://(?:www\\.)?morizon\\.pl/oferta/[^?#]+"
+    },
+    {
+      "name": "Gratka",
+      "enabled": true,
+      "search_urls": [
+        "https://gratka.pl/nieruchomosci/dzialki-grunty/gmina-zakliczyn",
+        "https://gratka.pl/nieruchomosci/garaze/gmina-zakliczyn"
+      ],
+      "detail_regex": "https?://(?:www\\.)?gratka\\.pl/nieruchomosci/[^?#]+"
+    },
+    {
+      "name": "Nieruchomosci-online",
+      "enabled": true,
+      "search_urls": [
+        "https://zakliczyn.nieruchomosci-online.pl/dzialki,sprzedaz/",
+        "https://zakliczyn.nieruchomosci-online.pl/garaze,sprzedaz/"
+      ],
+      "detail_regex": "https?://[^/]*nieruchomosci-online\\.pl/[^?#]*\\d+\\.html"
+    },
+    {
+      "name": "Adresowo",
+      "enabled": true,
+      "search_urls": [
+        "https://adresowo.pl/dzialki/gmina-zakliczyn/",
+        "https://adresowo.pl/garaze/gmina-zakliczyn/"
+      ],
+      "detail_regex": "https?://(?:www\\.)?adresowo\\.pl/o/[^?#]+"
+    },
+    {
+      "name": "Domiporta",
+      "enabled": true,
+      "search_urls": [
+        "https://www.domiporta.pl/dzialka/sprzedam/malopolskie/zakliczyn",
+        "https://www.domiporta.pl/garaz/sprzedam/malopolskie/zakliczyn"
+      ],
+      "detail_regex": "https?://(?:www\\.)?domiporta\\.pl/nieruchomosci/[^?#]+"
+    },
+    {
+      "name": "Sprzedajemy",
+      "enabled": true,
+      "search_urls": [
+        "https://sprzedajemy.pl/zakliczyn/nieruchomosci/dzialki-grunty",
+        "https://sprzedajemy.pl/zakliczyn/nieruchomosci/garaze-parkingi"
+      ],
+      "detail_regex": "https?://(?:www\\.)?sprzedajemy\\.pl/[^?#]+"
+    },
+    {
+      "name": "Lento",
+      "enabled": true,
+      "search_urls": [
+        "https://zakliczyn.lento.pl/nieruchomosci/dzialki-i-grunty.html",
+        "https://zakliczyn.lento.pl/nieruchomosci-w-okolicy/dzialki-i-grunty.html",
+        "https://zakliczyn.lento.pl/nieruchomosci/garaze-i-parkingi.html"
+      ],
+      "detail_regex": "https?://[^/]+\\.lento\\.pl/[^?#]+(?:,|%2C)\\d+\\.html"
+    },
+    {
+      "name": "Oferty.net",
+      "enabled": true,
+      "search_urls": [
+        "https://www.oferty.net/dzialki,zakliczyn",
+        "https://www.oferty.net/garaze,zakliczyn"
+      ],
+      "detail_regex": "https?://(?:m\\.|www\\.)?oferty\\.net/(?:dzialka|garaz)-na-sprzedaz-[^?#]+"
+    },
+    {
+      "name": "Tabelaofert",
+      "enabled": true,
+      "search_urls": [
+        "https://tabelaofert.pl/sprzedaz/dzialki/zakliczyn",
+        "https://tabelaofert.pl/sprzedaz/garaze/zakliczyn"
+      ],
+      "detail_regex": "https?://(?:www\\.)?tabelaofert\\.pl/oferta/[^?#]+"
+    }
+  ]
+}

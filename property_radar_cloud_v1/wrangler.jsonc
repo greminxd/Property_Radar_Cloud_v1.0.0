@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "property-radar",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-05",
+  "observability": { "enabled": true },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "property-radar-db",
+      "database_id": "PUT_D1_DATABASE_ID_HERE"
+    }
+  ],
+  "vars": {
+    "GITHUB_REPO": "PUT_GITHUB_USER/property-radar",
+    "SESSION_DAYS": "30"
+  }
+}

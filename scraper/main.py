@@ -51,9 +51,9 @@ async def run():
         sem=asyncio.Semaphore(max(1,int(cfg['browser'].get('parallel_sources',3))))
         async def scan_one(source):
             async with sem:
-                print(f"[SCAN] {source['name']}...")
+                print(f"[SCAN] {source['name']}...", flush=True)
                 try:
-                    recs,source_errors,diag=await scraper.collect_source(browser,source)
+                    recs,source_errors,diag=await asyncio.wait_for(scraper.collect_source(browser,source), timeout=float(cfg["browser"].get("source_timeout_s",300)))
                     return source,recs,source_errors,diag
                 except Exception as e:
                     return source,[],[f"{source['name']}: {type(e).__name__}: {e}"],{'source':source['name'],'healthy':False,'fatal':f'{type(e).__name__}: {e}'}
@@ -62,7 +62,7 @@ async def run():
         for source,recs,source_errors,diag in results:
             diagnostics.append(diag); all_recs.extend(recs); errs.extend(source_errors)
             if diag.get('healthy'): healthy_sources.append(source['name'])
-            print(f"       {source['name']}: {len(recs)} rekordów | linki {diag.get('discovered_links',0)} | detail {diag.get('detail_pages_ok',0)} | {'OK' if diag.get('healthy') else 'NIEPEWNY'}")
+            print(f"       {source['name']}: {len(recs)} rekordów | linki {diag.get('discovered_links',0)} | detail {diag.get('detail_pages_ok',0)} | {'OK' if diag.get('healthy') else 'NIEPEWNY'}", flush=True)
         await browser.close()
 
     accepted=[]; rejected=[]; area_cfg=cfg['area']

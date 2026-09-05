@@ -29,51 +29,64 @@
         <div><strong>Property Radar</strong><span>Zdonia · Zakliczyn · Słona + bliskie okolice</span></div>
       </div>
       <div class="top-actions">
-        <button id="scanBtn" class="ghost" title="Uruchom skan">↻ Skanuj</button>
+        <span class="muted">Skan: 09:00 / 20:00</span>
         <button id="logoutBtn" class="ghost" title="Wyloguj">Wyloguj</button>
       </div>
     </header>
 
     <main>
-      <section class="hero">
+      <section class="hero market-hero">
         <div class="hero-main">
-          <span class="eyebrow">RYNEK W TWOJEJ STREFIE</span>
-          <div class="market-line"><span id="marketMedian">—</span><small>mediana ceny działek / m²</small></div>
-          <div id="lastScan" class="muted">Ostatni skan: —</div>
+          <span class="eyebrow">RYNEK OFERTOWY</span>
+          <div class="market-duo">
+            <div><span>Mediana</span><b id="marketMedian">—</b></div>
+            <div><span>Średnia</span><b id="marketMean">—</b></div>
+          </div>
+          <div class="muted market-note">Aktywne działki z ceną za m² — to ceny z ogłoszeń, nie ceny sprzedaży.</div>
         </div>
-        <div class="stats-grid">
-          <div class="stat"><b id="statTotal">0</b><span>ofert</span></div>
-          <div class="stat"><b id="statDeals">0</b><span>okazji</span></div>
-          <div class="stat"><b id="statPrivate">0</b><span>prywatne 8+</span></div>
-          <div class="stat"><b id="statPhone">0</b><span>z telefonem</span></div>
+        <div class="hero-main transaction-panel">
+          <span class="eyebrow">🏛 RZECZYWISTE TRANSAKCJE RCN · 24 MIES.</span>
+          <div class="market-duo">
+            <div><span>Mediana</span><b id="rcnMedian">—</b></div>
+            <div><span>Średnia</span><b id="rcnMean">—</b></div>
+          </div>
+          <div id="rcnMeta" class="muted market-note">Transakcje: —</div>
         </div>
       </section>
 
+      <section class="stats-grid top-stats">
+        <div class="stat"><b id="statActive">0</b><span>aktywne działki</span></div>
+        <div class="stat"><b id="stat30">0</b><span>dodane ≤30 dni</span></div>
+        <div class="stat"><b id="statArchived">0</b><span>archiwalne</span></div>
+        <div class="stat"><b id="statPhone">0</b><span>z telefonem</span></div>
+      </section>
+      <div id="lastScan" class="muted scan-caption">Ostatni skan: —</div>
+
       <section class="toolbar">
-        <div class="searchbox"><span>⌕</span><input id="search" placeholder="Miejscowość, nr działki, WZ, telefon, opis…" /></div>
+        <div class="searchbox"><span>⌕</span><input id="search" placeholder="Miejscowość, nr działki, telefon, opis, źródło…" /></div>
         <button id="filtersBtn" class="primary compact">Filtry <span id="filterCount" class="filter-count">0</span></button>
       </section>
 
       <section class="quick" id="quickFilters">
-        <button class="pill active" data-quick="all">Wszystkie</button>
-        <button class="pill" data-quick="new">🆕 Nowe</button>
-        <button class="pill" data-quick="deal">🔥 Okazje</button>
-        <button class="pill" data-quick="private">🌲 Prywatne</button>
-        <button class="pill" data-quick="large">📐 Duże 1500+</button>
-        <button class="pill" data-quick="garage">🚗 Garaże</button>
+        <button class="pill active" data-quick="30d">📅 30 dni</button>
+        <button class="pill" data-quick="7d">🆕 7 dni</button>
+        <button class="pill" data-quick="drops">📉 Zmiany cen</button>
+        <button class="pill" data-quick="phone">☎ Z telefonem</button>
+        <button class="pill" data-quick="large">📐 1500+ m²</button>
+        <button class="pill" data-quick="reset">Wyczyść szybkie</button>
       </section>
 
       <section class="result-head">
-        <div><b id="resultCount">0</b> wyników</div>
+        <div><b id="resultCount">0</b> wyników <span id="activePreset" class="muted">• aktywne • publikacja ≤30 dni</span></div>
         <select id="sort">
-          <option value="new">najnowsze znalezione</option>
-          <option value="published">najnowsze ogłoszenia</option>
+          <option value="published">najnowsze publikacje</option>
+          <option value="updated">ostatnio aktualizowane</option>
           <option value="distance">najbliżej</option>
           <option value="priceAsc">cena: rosnąco</option>
           <option value="priceDesc">cena: malejąco</option>
           <option value="ppm">cena/m²: rosnąco</option>
           <option value="areaDesc">powierzchnia: malejąco</option>
-          <option value="privacy">prywatność</option>
+          <option value="rcnDelta">najlepiej vs RCN</option>
         </select>
       </section>
 
@@ -81,21 +94,48 @@
     </main>
 
     <aside id="filters" class="drawer" aria-hidden="true">
-      <div class="drawer-head"><div><strong>Filtry</strong><span>Możesz zaznaczyć kilka naraz</span></div><button id="filtersClose" class="icon-btn">×</button></div>
+      <div class="drawer-head"><div><strong>Filtry Mini App</strong><span>Tu łączysz wiele kryteriów naraz</span></div><button id="filtersClose" class="icon-btn">×</button></div>
       <div class="drawer-body">
+        <div class="filter-section two-cols">
+          <div>
+            <h3>Status oferty</h3>
+            <select id="statusFilter" class="filter-select">
+              <option value="active">Tylko aktywne</option>
+              <option value="all">Aktywne + archiwalne</option>
+              <option value="archived">Tylko archiwalne</option>
+            </select>
+          </div>
+          <div>
+            <h3>Data pierwotnego dodania</h3>
+            <select id="ageFilter" class="filter-select">
+              <option value="7">Ostatnie 7 dni</option>
+              <option value="30" selected>Ostatnie 30 dni</option>
+              <option value="90">Ostatnie 90 dni</option>
+              <option value="all">Dowolna data</option>
+              <option value="unknown">Data nieustalona</option>
+            </select>
+          </div>
+        </div>
         <div class="filter-section"><h3>Rodzaj</h3><div id="categoryFilters" class="check-grid"></div></div>
         <div class="filter-section"><h3>Typ działki</h3><div id="typeFilters" class="check-grid"></div></div>
         <div class="filter-section"><h3>Plan / możliwość zabudowy</h3><div id="planningFilters" class="check-grid"></div></div>
         <div class="filter-section"><h3>Miejscowość</h3><div id="localityFilters" class="check-grid"></div></div>
+        <div class="filter-section"><h3>Portal / źródło</h3><div id="sourceFilters" class="check-grid"></div></div>
         <div class="filter-section two-cols">
           <div><h3>Powierzchnia od</h3><input id="minArea" type="number" min="0" placeholder="np. 1500" /></div>
           <div><h3>Powierzchnia do</h3><input id="maxArea" type="number" min="0" placeholder="bez limitu" /></div>
           <div><h3>Cena do</h3><input id="maxPrice" type="number" min="0" placeholder="np. 250000" /></div>
           <div><h3>zł/m² do</h3><input id="maxPpm" type="number" min="0" step="0.01" placeholder="np. 60" /></div>
+          <div><h3>Maks. różnica vs RCN</h3><input id="maxRcnPremium" type="number" step="1" placeholder="np. 10 = do +10%" /></div>
+          <div class="filter-help">Wartość ujemna, np. <b>-10</b>, pokaże oferty min. 10% poniżej mediany realnych transakcji.</div>
         </div>
-        <div class="filter-section"><label class="toggle-row"><input id="onlyPhone" type="checkbox"/><span>Tylko z telefonem</span></label><label class="toggle-row"><input id="onlyParcel" type="checkbox"/><span>Tylko z numerem działki</span></label></div>
+        <div class="filter-section">
+          <label class="toggle-row"><input id="onlyPhone" type="checkbox"/><span>Tylko z telefonem</span></label>
+          <label class="toggle-row"><input id="onlyParcel" type="checkbox"/><span>Tylko z numerem działki</span></label>
+          <label class="toggle-row"><input id="onlyPriceChanges" type="checkbox"/><span>Tylko z istotną zmianą ceny</span></label>
+        </div>
       </div>
-      <div class="drawer-foot"><button id="clearFilters" class="ghost">Wyczyść</button><button id="applyFilters" class="primary">Pokaż wyniki</button></div>
+      <div class="drawer-foot"><button id="clearFilters" class="ghost">Reset do domyślnych</button><button id="applyFilters" class="primary">Pokaż wyniki</button></div>
     </aside>
     <div id="backdrop" class="backdrop hidden"></div>
 

@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install requests==2.32.5
-      - name: Initialize database and Telegram
+      - name: Initialize / migrate database and Telegram
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}

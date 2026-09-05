@@ -1,233 +1,92 @@
-# Property Radar Cloud v1.0
+# Property Radar Cloud v1.2.0
 
-Prywatny agregator działek i garaży dla strefy **Zdonia / Zakliczyn / Słona + bliskie okolice**.
+Prywatny monitoring działek i garaży dla strefy **Zdonia / Zakliczyn / Słona + bliskie okolice**.
 
-## Co jest gdzie
+## Architektura
 
-- **Cloudflare Worker** — panel WWW, API, logowanie, Telegram webhook i Mini App.
-- **Cloudflare D1** — trwała baza ofert i historia cen. Działa nawet gdy PC jest wyłączony.
-- **GitHub Actions** — Python + Playwright + Chromium headless, czyli ciężkie skanowanie portali.
-- **Telegram** — alerty, `/start`, `/status`, `/skanuj`, skróty ofert i Mini App.
-- **HypeHoolz / stary Worker `hype`** — NIE JEST DOTYKANY.
+- **Cloudflare Worker** — prywatny panel WWW/Mini App, API, logowanie i webhook Telegrama.
+- **Cloudflare D1** — trwała baza ofert, historia cen, status skanów i cache realnych transakcji RCN.
+- **GitHub Actions** — Python + Playwright + Chromium; automatyczny skan maks. 2 razy dziennie.
+- **Telegram** — alerty o faktycznie nowych publikacjach oraz istotnych zmianach cen, status bota i bazy.
 
-## Co bot zbiera
+## Skanowanie
 
-11 źródeł: Otodom, OLX, Morizon, Gratka, Nieruchomosci-online, Adresowo, Domiporta, Sprzedajemy, Lento, Oferty.net, Tabelaofert.
+Automatycznie o **09:00 i 20:00 czasu Europe/Warsaw**. Dodatkowo scraper ma twardy limit maksymalnie dwóch zakończonych skanów dziennie, więc przypadkowe kolejne uruchomienie kończy się przed startem Chromium.
 
-Dla każdej oferty: cena, m², zł/m², lokalizacja, odległość, telefon (gdy publicznie dostępny), nr działki, data, źródło, zdjęcie, opis, typ działki, MPZP/WZ, historia ceny, scoring prywatności i ocena ceny względem lokalnej mediany porównawczej.
+## Daty ofert
 
-Nie ma filtra minimalnego metrażu. Podejrzane wartości (np. 15 m² vs 15 ar w opisie) są oznaczane, nie odrzucane.
+System rozdziela:
 
-## Strefa
+- `published_at` — pierwotna data publikacji na portalu,
+- `updated_at` — data odświeżenia / aktualizacji na portalu,
+- `first_seen` — kiedy Property Radar pierwszy raz zobaczył URL.
 
-Główne: **Zdonia, Zakliczyn, Słona**.
+Stara oferta wykryta dzisiaj nie staje się przez to "nowa". Mini App domyślnie pokazuje **aktywne oferty opublikowane w ostatnich 30 dniach**. Oferta bez pewnej daty publikacji nie dostaje alertu "NOWA".
 
-Bliskie: **Bieśnik, Kończyska, Olszowa, Paleśnica, Lusławice, Wesołów**.
+Oferty z oznaczeniami typu „Ogłoszenie archiwalne”, „Oferta nieaktualna” są przechowywane historycznie, ale mają `active=0`, nie wysyłają alertów i nie są widoczne w domyślnym widoku.
 
-Milówka, Złota i jawnie wskazane dalsze miejscowości są odrzucane. Dla niejasnej lokalizacji działa ostrożny fallback odległości do 5 km od Bieśnika.
+## Ceny i alerty
 
----
+Każda rzeczywista zmiana ceny jest zachowana w `price_history`, ale Telegram nie alarmuje o kosmetycznych zmianach. Domyślnie alert jest istotny, jeśli zmiana wynosi co najmniej **1000 zł** i jednocześnie co najmniej **5000 zł lub 3%**.
 
-# Instalacja — po kolei
+Przykłady:
 
-## 1. GitHub
+- 300 000 → 299 999: brak alertu,
+- 300 000 → 299 000: brak alertu,
+- 300 000 → 295 000: alert,
+- 50 000 → 48 000: alert (4%).
 
-Utwórz **nowe prywatne repo**:
+Próg jest liczony kumulacyjnie od ostatniej ceny referencyjnej, więc seria małych obniżek nie omija alarmu.
 
-`property-radar`
+## Dwa osobne benchmarki cenowe
 
-Wgraj do niego CAŁĄ zawartość tego ZIP-a. Nie wrzucaj tego do repo HypeHoolz.
+1. **Ceny z ogłoszeń** — mediana i średnia porównywalnych aktywnych ofert.
+2. **RCN** — rzeczywiste ceny transakcyjne działek z Rejestru Cen Nieruchomości, domyślnie ostatnie 24 miesiące.
 
-## 2. Cloudflare D1
+Dla pojedynczej oferty RCN dobiera transakcje o podobnym metrażu w promieniu 3 km, potem 5 km i 10 km, zależnie od liczby danych. Mini App pokazuje także ostatnie porównywalne transakcje w pobliżu.
 
-Cloudflare Dashboard → **Storage & databases → D1 → Create database**.
+RCN jest odświeżany najwyżej raz dziennie; drugi skan używa cache D1.
 
-Nazwa:
+## Prywatność
 
-`property-radar-db`
+Stary tekstowy score prywatności został wyłączony. Bez dokładnej geometrii działki / numeru działki i danych o budynkach nie ma sensu udawać precyzyjnej oceny odosobnienia.
 
-Po utworzeniu skopiuj **Database ID**.
+## Telegram
 
-W repo otwórz `wrangler.jsonc` i zmień:
+Główne menu:
 
-`PUT_D1_DATABASE_ID_HERE`
+- 🏡 Otwórz Mini App
+- 🆕 Nowe ogłoszenia
+- 📉 Zmiany cen
+- 🤖 Status bota
+- 🗃 Status bazy
+- 🧪 Diagnostyka — admin
 
-na prawdziwe Database ID.
-
-Zmień też:
-
-`PUT_GITHUB_USER/property-radar`
-
-na np.:
-
-`greminxd/property-radar`
-
-Zapisz/commit.
-
-## 3. Nowy Worker — NIE `hype`
-
-Cloudflare → **Compute → Workers & Pages → Create application → Import a repository**.
-
-Wybierz nowe repo `property-radar`.
-
-Nazwa Workera:
-
-`property-radar`
-
-Build command: zostaw pusty.
-
-Deploy command:
-
-`npx wrangler deploy`
-
-Cloudflare powinien użyć `wrangler.jsonc` i wdrożyć Worker + katalog `public/`.
-
-Docelowy adres będzie podobny do:
-
-`https://property-radar.hoolz.workers.dev`
-
-Nie potrzebujesz na początku własnej domeny ani subdomeny HypeHoolz.
-
-## 4. Sekrety runtime w Cloudflare Worker
-
-Worker `property-radar` → **Settings → Variables & Secrets**.
-
-Dodaj jako **Secrets**:
-
-- `PANEL_PASSWORD` — Twoje mocne hasło do panelu.
-- `SESSION_SECRET` — losowy sekret minimum ~40 znaków.
-- `TELEGRAM_BOT_TOKEN` — token z BotFather.
-- `TELEGRAM_ADMINS` — lista Telegram user_id administratorów, np. `123,456`.
-- `TELEGRAM_USERS` — opcjonalna lista zwykłych użytkowników.
-- `TELEGRAM_ALLOWED_USER_ID` — tylko kompatybilność ze starą v1.0.0; po migracji można usunąć.
-- `TELEGRAM_WEBHOOK_SECRET` — drugi losowy sekret.
-
-Opcjonalnie, żeby działał przycisk **Skanuj teraz** z panelu/Telegrama:
-
-- `GITHUB_DISPATCH_TOKEN` — fine-grained GitHub PAT z dostępem do tego repo i Actions: Read and write.
-
-Losowe sekrety możesz wygenerować lokalnie:
-
-`python scripts/generate_secrets.py`
-
-`SESSION_DAYS=30` jest już ustawione w `wrangler.jsonc`.
-
-## 5. GitHub Actions Secrets
-
-Repo GitHub → **Settings → Secrets and variables → Actions → New repository secret**.
-
-Dodaj:
-
-- `CF_ACCOUNT_ID` — ID konta Cloudflare.
-- `CF_D1_DATABASE_ID` — Database ID z kroku 2.
-- `CF_D1_API_TOKEN` — token Cloudflare z uprawnieniami **D1 Read + D1 Write** dla tego konta.
-- `TELEGRAM_BOT_TOKEN` — ten sam token bota.
-- `TELEGRAM_CHAT_IDS` — lista chat_id odbiorców alertów, np. `123,456`.
-- `TELEGRAM_CHAT_ID` — zgodność wsteczna dla jednego odbiorcy.
-- `TELEGRAM_WEBHOOK_SECRET` — identyczny jak w Workerze.
-- `PANEL_URL` — np. `https://property-radar.hoolz.workers.dev`.
-
-### CF_ACCOUNT_ID
-
-Cloudflare → Account home. Account ID możesz skopiować z danych konta / API section.
-
-### CF_D1_API_TOKEN
-
-Cloudflare → My Profile → API Tokens → Create Custom Token.
-
-Nadaj tylko potrzebne uprawnienia do D1. Nie używaj Global API Key.
-
-## 6. Zainicjalizuj bazę i Telegram
-
-GitHub → repo → **Actions → Setup D1 + Telegram → Run workflow**.
-
-Workflow:
-
-1. tworzy tabele w D1 z `schema.sql`,
-2. ustawia Telegram webhook na Workerze,
-3. ustawia komendy bota,
-4. ustawia przycisk menu **🏡 Oferty** jako Telegram Mini App.
-
-Po zielonym zakończeniu napisz botowi `/start`.
-
-## 7. Pierwszy skan
-
-GitHub → **Actions → Scan nieruchomosci → Run workflow**.
-
-Pierwszy skan może trwać kilka–kilkadziesiąt minut, bo bot odwiedza konkretne strony ofert w Chromium.
-
-Po zakończeniu:
-
-- D1 zawiera oferty,
-- Telegram dostaje podsumowanie i maksymalnie 10 najciekawszych ofert pierwszego uruchomienia,
-- panel pokazuje pełną bazę.
-
-Jeżeli coś nie działa, w wyniku workflow jest artifact `scan-diagnostics-*` z:
-
-- `scan_diagnostics.json`
-- `rejected_area.json`
-- `last_errors.txt`
-
-## 8. Automatyka
-
-`scan.yml` ma domyślnie jeden skan dziennie:
-
-`15 6 * * *` (06:15 UTC)
-
-oraz ręczne `Run workflow`.
-
-Nie ma skanowania co 15 minut — to celowe, żeby ograniczyć blokady portali i zużycie GitHub Actions.
-
----
-
-# Telegram
-
-Po konfiguracji działają:
+Komendy:
 
 - `/start`
+- `/nowe`
+- `/ceny`
 - `/status`
+- `/statuspelny`
+- `/baza`
 - `/id`
-- `/skanuj` — po dodaniu `GITHUB_DISPATCH_TOKEN`
-- przyciski Najnowsze / Okazje / Prywatne / Duże / Garaże
-- `🏡 Oferty` — Mini App
+- `/diag`
 
-Mini App uwierzytelnia Twoje konto Telegram kryptograficznie. Użytkownik o innym `user_id` nie dostanie sesji do API.
+Alert próbuje wysłać pierwsze zdjęcie z ogłoszenia przez `sendPhoto`; gdy portal/Telegram odrzuci obraz, automatycznie przechodzi na wiadomość tekstową.
 
-W zwykłej przeglądarce pojawia się ekran hasła `PANEL_PASSWORD`.
+## Mini App
 
-## Dlaczego bez Cloudflare Access na całym Workerze?
+Domyślnie: aktywne + publikacja do 30 dni.
 
-Bo ten sam Worker przyjmuje publiczny webhook Telegrama. Worker-level Access zablokowałby Telegram przed dotarciem do `/telegram/webhook`, chyba że robilibyśmy dodatkowe reguły bypass. Tu jest prościej:
+Filtry obejmują status, wiek publikacji, typ działki, WZ/MPZP, miejscowość, portal, powierzchnię, cenę, zł/m², telefon, numer działki, istotne zmiany ceny i maksymalną różnicę ceny względem mediany RCN.
 
-- dane API są chronione sesją,
-- zwykła przeglądarka wymaga hasła,
-- Telegram używa podpisanego `initData`,
-- webhook wymaga osobnego `TELEGRAM_WEBHOOK_SECRET`,
-- statyczny HTML nie zawiera kluczy ani ofert,
-- `noindex,nofollow` ukrywa panel przed indeksowaniem.
+## Aktualizacja istniejącej instalacji do 1.2.0
 
-Jeśli później chcesz, można dodatkowo dołożyć Cloudflare Access tylko na wybrany hostname/path.
+1. Wgraj pliki patcha do root repo i push.
+2. Poczekaj na zielony deploy Cloudflare.
+3. GitHub Actions → **Setup D1 + Telegram** → Run workflow — jeden raz. Migrator zachowuje istniejące dane i dodaje nowe kolumny/tabele.
+4. Opcjonalnie uruchom jeden ręczny **Scan nieruchomosci**, o ile limit 2 skanów danego dnia nie został osiągnięty.
+5. Potem zostaw harmonogram 09:00 / 20:00.
 
----
-
-# Ocena „okazji”
-
-Bot nie porównuje rolnej do budowlanej bez kontroli.
-
-Kolejność porównań:
-
-1. ten sam typ + podobny metraż + podobny status zabudowy,
-2. ten sam typ + podobny metraż,
-3. podobny metraż + podobny status zabudowy,
-4. podobny metraż,
-5. ten sam typ.
-
-Panel pokazuje również liczbę porównań i jakość benchmarku: wysoka / dobra / średnia / orientacyjna / słaba.
-
----
-
-# Ważne ograniczenia
-
-Portale mogą zmieniać HTML albo blokować ruch z adresów centrów danych GitHuba. Dlatego każdy portal ma diagnostykę i jeden uszkodzony skan nie kasuje starej bazy. Oferta jest wygaszana dopiero po 3 poprawnych skanach danego źródła, w których jej nie było.
-
-Jeżeli konkretnie Otodom/OLX zacznie blokować GitHub Actions, można później dodać hybrydowy fallback z Twojego PC dla tylko tego jednego źródła, zapisujący do tej samej D1.
+Nie są potrzebne nowe sekrety dla RCN.

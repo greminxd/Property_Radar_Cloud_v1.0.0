@@ -3,7 +3,8 @@ name: Scan nieruchomosci
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 6 * * *"
+    - cron: "0 9,20 * * *"
+      timezone: "Europe/Warsaw"
 
 concurrency:
   group: property-radar-scan

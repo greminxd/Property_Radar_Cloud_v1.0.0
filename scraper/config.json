@@ -26,8 +26,13 @@
     "missing_scans_before_inactive": 3
   },
   "telegram": {
-    "first_run_top_n": 10,
-    "send_summary_even_if_nothing_new": true
+    "new_alert_max_age_days": 3,
+    "send_scan_summary": false,
+    "price_change_alert": {
+      "min_absolute_pln": 5000,
+      "min_percent": 3.0,
+      "minimum_any_pln": 1000
+    }
   },
   "scoring": {
     "minimum_comparables_for_deal_score": 3,
@@ -198,5 +203,15 @@
       ],
       "detail_regex": "https?://(?:www\\.)?tabelaofert\\.pl/oferta/[^?#]+"
     }
-  ]
+  ],
+  "rcn": {
+    "enabled": true,
+    "months": 24,
+    "fetch_radius_km": 12,
+    "max_features": 2500,
+    "minimum_comparables": 3
+  },
+  "ui": {
+    "default_published_days": 30
+  }
 }

@@ -106,6 +106,91 @@ def _specific_locality(title: str, desc: str, structured_loc: str) -> tuple[str,
     return "", "none"
 
 
+
+
+_AREA_TOKEN = r"(\d[\d\s\xa0]*(?:[.,]\d+)?)\s*(ha|m(?:²|2)|a|ar|ara|ary|arów|arow)\b"
+
+def _area_token_to_m2(raw_number: str, unit: str) -> float | None:
+    try:
+        n=float((raw_number or '').replace('\xa0','').replace(' ','').replace(',','.'))
+    except Exception:
+        return None
+    u=asciifold(unit or '')
+    if u=='ha': n*=10000
+    elif u in {'a','ar','ara','ary','arow'}: n*=100
+    if 5 <= n <= 5_000_000:
+        return float(n)
+    return None
+
+def _area_from_json_value(v) -> float | None:
+    """Parse a JSON-LD area value without confusing floorSize with lotSize."""
+    if isinstance(v,(int,float)):
+        n=float(v); return n if 5 <= n <= 5_000_000 else None
+    if isinstance(v,str):
+        m=re.search(_AREA_TOKEN,v,re.I)
+        if m:return _area_token_to_m2(m.group(1),m.group(2))
+        try:
+            n=float(v.replace(' ','').replace(',','.'));return n if 5<=n<=5_000_000 else None
+        except:return None
+    if isinstance(v,dict):
+        raw=v.get('value') or v.get('maxValue') or v.get('minValue')
+        unit=v.get('unitText') or v.get('unitCode') or ''
+        if raw is None:return None
+        # Schema.org often uses MTK = square metre.
+        if str(unit).upper() in {'MTK','M2','M²','SQM'}:unit='m2'
+        if str(unit).upper() in {'HAR','HA'}:unit='ha'
+        if unit:
+            return _area_token_to_m2(str(raw),str(unit))
+        try:
+            n=float(str(raw).replace(' ','').replace(',','.'));return n if 5<=n<=5_000_000 else None
+        except:return None
+    return None
+
+def _jsonld_plot_area(objs) -> tuple[float | None,str | None]:
+    """Find explicit land/lot area in JSON-LD. Never use floorSize here."""
+    strong_keys={'lotsize','landarea','plotarea','parcelarea','lotarea','plotsize'}
+    stack=list(objs or [])
+    while stack:
+        o=stack.pop()
+        if isinstance(o,list):stack.extend(o);continue
+        if not isinstance(o,dict):continue
+        # additionalProperty / PropertyValue style: name=Powierzchnia działki, value=37000
+        name=asciifold(str(o.get('name') or o.get('propertyID') or o.get('propertyId') or ''))
+        if any(k in name for k in ['powierzchnia dzialki','powierzchnia gruntu','powierzchnia parceli','plot area','lot size','land area']):
+            a=_area_from_json_value(o.get('value'))
+            if a:return a,'jsonld-property'
+        for k,v in o.items():
+            kf=asciifold(str(k)).replace('_','').replace('-','')
+            if kf in strong_keys:
+                a=_area_from_json_value(v)
+                if a:return a,f'jsonld:{k}'
+            if isinstance(v,(dict,list)):stack.append(v)
+    return None,None
+
+def _explicit_plot_area(text: str) -> tuple[float | None,str | None,str | None]:
+    """Prefer a labelled parcel/land area over generic areas from the title/body.
+
+    Example that used to fail: 'DOM, 350m, 3.74ha' plus the actual field
+    'Powierzchnia działki 37000 m²'. 350 m² is floor area and 3.74 ha may be a rounded
+    headline value; the labelled parcel field must win.
+    """
+    t=text or ''
+    patterns=[
+        rf"(?:powierzchnia|pow\.?)\s+(?:działki|dzialki|gruntu|parceli)\s*[:\-]?\s*{_AREA_TOKEN}",
+        rf"(?:działka|dzialka|grunt|parcela)\s+(?:o\s+)?(?:powierzchni|pow\.?)\s*[:\-]?\s*{_AREA_TOKEN}",
+        # Portal rows such as: 'Działka: budowlana, 2 900 m²'
+        rf"(?:działka|dzialka|grunt|parcela)\s*:\s*[^|;•]{{0,90}}?[,;]\s*{_AREA_TOKEN}",
+    ]
+    for i,p in enumerate(patterns):
+        m=re.search(p,t,re.I)
+        if not m:continue
+        # _AREA_TOKEN contributes two final capture groups: number and unit
+        num,unit=m.group(m.lastindex-1),m.group(m.lastindex)
+        a=_area_token_to_m2(num,unit)
+        if a:return a,f'label:{i+1}',clean_text(m.group(0))[:180]
+    return None,None,None
+
+
 def parse_detail(html: str, url: str, source: str, category_hint: str | None = None):
     soup=BeautifulSoup(html,"lxml")
     objs=jsonld_objects(soup)
@@ -118,7 +203,7 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
         desc=clean_text(main.get_text(" ",strip=True))[:10000] if main else body[:7000]
     combined=clean_text(title+" "+desc+" "+body[:16000])
 
-    price=None; structured_loc=""; published=""
+    price=None; structured_loc=""; published=""; updated=""
     for o in objs:
         if not isinstance(o,dict): continue
         offers=o.get("offers")
@@ -134,14 +219,43 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
                     structured_loc=clean_text(", ".join(str(addr.get(k,"")) for k in ["addressRegion"] if addr.get(k)))
             elif isinstance(addr,str): structured_loc=clean_text(addr)
         if not published: published=clean_text(str(o.get("datePosted") or o.get("datePublished") or ""))
+        if not updated: updated=clean_text(str(o.get("dateModified") or ""))
 
     if price is None: price=parse_price(combined)
-    area,_=best_area(combined)
-    awarn=area_warning(combined)
+
+    # Determine object type before choosing an area. A house page can contain both
+    # 350 m² floor area and 37 000 m² parcel area; generic first/most-common-number
+    # heuristics are not safe for that.
+    cat=classify_category(title,url,combined,category_hint=category_hint)
+    strong_area,strong_source=_jsonld_plot_area(objs)
+    strong_raw=None
+    if strong_area is None:
+        strong_area,strong_source,strong_raw=_explicit_plot_area(combined)
+    if strong_area is not None:
+        area=strong_area
+        # Different floor/building areas are not a contradiction when parcel area is explicit.
+        awarn=None
+    else:
+        area,_=best_area(combined)
+        awarn=area_warning(combined)
     phone=_phone_from_soup(soup, desc+" "+body)
     if not published:
-        dm=re.search(r"(?:Dodane|Opublikowano|Data dodania)\s*[:–-]?\s*([^|]{4,45})", combined, re.I)
+        dm=re.search(r"(?:Dodano|Dodane|Opublikowano|Data dodania|Data publikacji)\s*[:–-]?\s*([^|\n]{4,55})", combined, re.I)
         if dm: published=clean_text(dm.group(1))
+    if not updated:
+        um=re.search(r"(?:Aktualizacja|Zaktualizowano|Zaktualizowane|Zaktualizowana|Odświeżono|Odswiezono|Odświeżone|Odswiezone|Data aktualizacji)\s*[:–-]?\s*([^|\n]{4,55})", combined, re.I)
+        if um: updated=clean_text(um.group(1))
+
+    af=asciifold(combined[:12000])
+    archive_reason=None
+    archive_markers=[
+        'ogloszenie archiwalne','oferta archiwalna','ogloszenie nieaktualne','oferta nieaktualna',
+        'ta oferta jest nieaktualna','oferta zostala zakonczona','ogloszenie zostalo zakonczone'
+    ]
+    for marker in archive_markers:
+        if marker in af:
+            archive_reason=marker; break
+    source_status='archived' if archive_reason else 'active' 
 
     # Alternate metadata can improve structured location.
     if not structured_loc:
@@ -157,8 +271,7 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
             if m:
                 loc=clean_text(m.group(1)); loc_conf="regex"; break
 
-    cat=classify_category(title,url,combined,category_hint=category_hint)
-    ptype=classify_plot_type(title,combined) if cat=="plot" else "garaż"
+    ptype=classify_plot_type(title,combined) if cat=="plot" else ("garaż" if cat=="garage" else "n/d")
     plan=planning_status(combined) if cat=="plot" else "n/d"
     parcel=parcel_number(combined) if cat=="plot" else None
     image=_find_meta(soup,"og:image","twitter:image") or None
@@ -168,7 +281,8 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
         "title": title[:500], "price":price, "area_m2":area,
         "price_m2": (price/area if price and area else None), "plot_type":ptype,
         "planning_status":plan, "location":loc[:250], "location_confidence":loc_conf,
-        "phone":phone, "parcel_number":parcel, "published_text":published[:100],
+        "phone":phone, "parcel_number":parcel, "published_text":published[:100], "updated_text":updated[:100],
+        "source_status":source_status, "archive_reason":archive_reason,
         "area_warning":awarn, "description":desc[:12000], "image_url":image,
         "_jsonld":objs, "_body":combined,
     }
@@ -212,6 +326,12 @@ def refine_from_rendered_text(rec: dict, visible_text: str) -> dict:
         if rec.get("planning_status") in {None,"","nieustalone"}:
             rec["planning_status"]=planning_status(early)
     if not rec.get("published_text"):
-        dm=re.search(r"(?:Dodane|Opublikowano|Data dodania)\s*[:–-]?\s*([^|\n]{4,55})", early, re.I)
+        dm=re.search(r"(?:Dodano|Dodane|Opublikowano|Data dodania|Data publikacji)\s*[:–-]?\s*([^|\n]{4,55})", early, re.I)
         if dm: rec["published_text"]=clean_text(dm.group(1))[:100]
+    if not rec.get("updated_text"):
+        um=re.search(r"(?:Aktualizacja|Zaktualizowano|Zaktualizowane|Zaktualizowana|Odświeżono|Odswiezono|Odświeżone|Odswiezone|Data aktualizacji)\s*[:–-]?\s*([^|\n]{4,55})", early, re.I)
+        if um: rec["updated_text"]=clean_text(um.group(1))[:100]
+    af=asciifold(early)
+    if any(x in af for x in ['ogloszenie archiwalne','oferta archiwalna','ogloszenie nieaktualne','oferta nieaktualna','ta oferta jest nieaktualna']):
+        rec['source_status']='archived'; rec['archive_reason']='archiwalne/nieaktualne wg portalu'
     return rec

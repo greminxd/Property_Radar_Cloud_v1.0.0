@@ -93,14 +93,14 @@ class Scraper:
                         errors.append(f"{current}: {type(e).__name__}: {e}"); break
 
             links=list(link_hints.keys())[:self.cfg["browser"].get("max_detail_pages_per_source",80)]
-            results=[]; detail_ok=0; listing_like_count=0
+            results=[]; detail_ok=0; listing_like_count=0; blocked_count=0; failed_samples=[]
             detail_parallel=max(1,int(self.cfg["browser"].get("parallel_details_per_source",4)))
             sem=asyncio.Semaphore(detail_parallel)
             counter=0
             lock=asyncio.Lock()
 
             async def one_detail(u):
-                nonlocal detail_ok, listing_like_count, counter
+                nonlocal detail_ok, listing_like_count, counter, blocked_count
                 async with sem:
                     p=await context.new_page()
                     try:
@@ -124,30 +124,47 @@ class Scraper:
                         if visible:
                             rec=refine_from_rendered_text(rec,visible)
                             rec["_body"]=(rec.get("_body") or "")+" "+visible[:12000]
-                        listing_like=bool(rec.get("title")) and (rec.get("price") is not None or rec.get("area_m2") is not None)
+                        block_text=((rec.get('title') or '')+' '+(visible or '')[:2500]).lower()
+                        blocked=any(x in block_text for x in ['just a moment','access denied','verify you are human','captcha','robot or human','are you a robot','sprawdź, czy jesteś człowiekiem'])
+                        listing_like=bool(rec.get("title")) and (rec.get("price") is not None or rec.get("area_m2") is not None) and not blocked
                         async with lock:
                             detail_ok += 1
+                            if blocked: blocked_count += 1
                             if listing_like: listing_like_count += 1
+                            elif len(failed_samples)<3:
+                                failed_samples.append({'url':u,'title':(rec.get('title') or '')[:160],'blocked':blocked,'text':(visible or '')[:220].replace('\n',' ')})
                             if listing_like and rec["category"] in self.cfg["filters"]["categories"]: results.append(rec)
                     except Exception as e:
                         async with lock: errors.append(f"{u}: {type(e).__name__}: {e}")
                     finally:
-                        await p.close()
+                        try:
+                            if not p.is_closed(): await p.close()
+                        except Exception:
+                            pass
                         async with lock:
                             counter += 1
                             if counter % 10 == 0 or counter == len(links):
                                 print(f"       {source['name']}: szczegóły {counter}/{len(links)}", flush=True)
                     await asyncio.sleep(self.cfg["browser"].get("delay_between_pages_s",0.15))
 
-            if links:
-                await asyncio.gather(*(one_detail(u) for u in links))
+            tasks=[asyncio.create_task(one_detail(u)) for u in links]
+            if tasks:
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                except asyncio.CancelledError:
+                    for t in tasks: t.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
 
             diagnostics={
                 "source":source["name"],"search_pages_ok":search_pages_ok,"discovered_links":len(links),
                 "detail_pages_ok":detail_ok,"listing_like":listing_like_count,"records":len(results),
-                "errors":len(errors),"healthy":bool(search_pages_ok>0 and links and detail_ok>0 and listing_like_count>0),
+                "errors":len(errors),"blocked":blocked_count,"failed_samples":failed_samples,"healthy":bool(search_pages_ok>0 and links and detail_ok>0 and listing_like_count>0),
             }
             return results,errors,diagnostics
         finally:
-            await context.close()
+            try:
+                await context.close()
+            except Exception:
+                pass
 

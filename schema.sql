@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS listings (
   parcel_number TEXT,
   published_text TEXT,
   published_at TEXT,
+  updated_text TEXT,
+  updated_at TEXT,
+  source_status TEXT DEFAULT 'active',
+  archive_reason TEXT,
   area_warning TEXT,
   image_url TEXT,
   location_confidence TEXT,
@@ -33,8 +37,22 @@ CREATE TABLE IF NOT EXISTS listings (
   privacy_reasons TEXT,
   deal_label TEXT,
   median_comparable REAL,
+  market_mean_comparable REAL,
   comparable_count INTEGER DEFAULT 0,
   comparison_quality TEXT,
+  rcn_median_ppm REAL,
+  rcn_mean_ppm REAL,
+  rcn_count INTEGER DEFAULT 0,
+  rcn_radius_km REAL,
+  rcn_months INTEGER,
+  rcn_last_date TEXT,
+  rcn_last_ppm REAL,
+  rcn_quality TEXT,
+  price_alert_reference REAL,
+  last_meaningful_price_change_at TEXT,
+  last_price_old REAL,
+  last_price_new REAL,
+  last_price_change_pct REAL,
   description TEXT
 );
 
@@ -44,6 +62,27 @@ CREATE TABLE IF NOT EXISTS price_history (
   seen_at TEXT NOT NULL,
   price REAL NOT NULL,
   FOREIGN KEY(listing_id) REFERENCES listings(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS rcn_transactions (
+  tx_key TEXT PRIMARY KEY,
+  transaction_date TEXT,
+  price REAL,
+  area_m2 REAL,
+  price_m2 REAL,
+  parcel_number TEXT,
+  mpzp TEXT,
+  use_type TEXT,
+  address TEXT,
+  lat REAL,
+  lon REAL,
+  fetched_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS system_state (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS geocode_cache (
@@ -74,7 +113,11 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 CREATE INDEX IF NOT EXISTS idx_listings_active ON listings(active);
 CREATE INDEX IF NOT EXISTS idx_listings_fp ON listings(fingerprint);
 CREATE INDEX IF NOT EXISTS idx_listings_last_seen ON listings(last_seen);
+CREATE INDEX IF NOT EXISTS idx_listings_published ON listings(published_at);
 CREATE INDEX IF NOT EXISTS idx_listings_location ON listings(area_locality);
 CREATE INDEX IF NOT EXISTS idx_listings_type ON listings(plot_type);
+CREATE INDEX IF NOT EXISTS idx_listings_source_status ON listings(source_status);
 CREATE INDEX IF NOT EXISTS idx_price_history_listing ON price_history(listing_id, seen_at);
 CREATE INDEX IF NOT EXISTS idx_scan_runs_finished ON scan_runs(finished_at);
+CREATE INDEX IF NOT EXISTS idx_rcn_date ON rcn_transactions(transaction_date);
+CREATE INDEX IF NOT EXISTS idx_rcn_parcel ON rcn_transactions(parcel_number);

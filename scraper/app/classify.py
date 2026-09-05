@@ -40,6 +40,11 @@ def classify_category(title: str, url: str, text: str, category_hint: str | None
         return "plot"
     if any(k in t for k in ["garaz", "miejsce postojowe", "parking", "boks garazowy"]):
         return "garage"
+    # Strong title signal wins over a broad/misclassified search result. The radar
+    # is intentionally plots + garages; houses/flats/commercial premises must not
+    # leak in just because a portal returned them on a land-results page.
+    if re.search(r"(?:^|[^a-z0-9])(dom|domek|willa|mieszkanie|apartament|lokal|kamienica|pensjonat|hala|magazyn)(?:[^a-z0-9]|$)", t):
+        return "other"
     if any(k in u for k in ["/dzialka", "/dzialki", "dzialka-na-sprzedaz", "dzialki-grunty"]):
         return "plot"
     if any(k in u for k in ["/garaz", "/garaze", "garaz-na-sprzedaz", "garaze-parkingi"]):

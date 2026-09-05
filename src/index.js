@@ -172,69 +172,151 @@ function sizeBadge(v) {
   return '';
 }
 
-function listingText(r) {
-  const cat = r.category === 'garage' ? 'GARAŻ' : 'DZIAŁKA';
+function listingText(r, mode = 'new') {
   const loc = r.area_locality || r.location || '?';
   const dist = r.distance_km == null ? '?' : `${Number(r.distance_km).toFixed(1)} km`;
-  const lines = [
-    `📌 <b>${cat}</b> — <b>${escapeHtml(loc)}</b> • ${dist}`,
-    `💰 <b>${money(r.price)}</b> • ${ppm(r.price_m2)}`,
-    `📐 <b>${area(r.area_m2)}</b> ${sizeBadge(r.area_m2)}`,
-  ];
-  if (r.category === 'plot') {
-    lines.push(`🏷 ${escapeHtml(r.plot_type || 'nieustalona')} • 🏗 ${escapeHtml(r.planning_status || 'nieustalone')}`);
-    lines.push(`🌲 prywatność <b>${r.privacy_score || '?'}/10</b> • 📊 ${escapeHtml(r.deal_label || '?')}`);
+  const title = r.title || 'Działka bez tytułu';
+  const lines = [`${mode === 'price' ? '📉' : '🆕'} <b>${escapeHtml(title)}</b>`, `📍 <b>${escapeHtml(loc)}</b> • ${dist}`];
+  if (mode === 'price' && r.last_price_old != null && r.last_price_new != null) {
+    lines.push(`💰 <s>${money(r.last_price_old)}</s> → <b>${money(r.last_price_new)}</b> (${Number(r.last_price_change_pct || 0).toFixed(1)}%)`);
+  } else lines.push(`💰 <b>${money(r.price)}</b> • ${ppm(r.price_m2)}`);
+  lines.push(`📐 <b>${area(r.area_m2)}</b> ${sizeBadge(r.area_m2)}`);
+  if (r.published_at) lines.push(`🗓 Dodane: <b>${plDateOnly(r.published_at)}</b>`);
+  else lines.push(`🗓 Data dodania: <b>nieustalona</b>`);
+  if (r.plot_type) lines.push(`🏷 ${escapeHtml(r.plot_type)} • 🏗 ${escapeHtml(r.planning_status || 'nieustalone')}`);
+  if (r.median_comparable) lines.push(`📢 Ogłoszenia: mediana <b>${ppm(r.median_comparable)}</b> • średnia ${ppm(r.market_mean_comparable)} (${r.comparable_count || 0})`);
+  if (r.rcn_median_ppm) {
+    lines.push(`🏛 RCN ${r.rcn_months || 24} mies.: mediana <b>${ppm(r.rcn_median_ppm)}</b> • średnia ${ppm(r.rcn_mean_ppm)} (${r.rcn_count || 0} trans., ≤${r.rcn_radius_km || '?'} km)`);
+    if (r.rcn_last_date) lines.push(`🧾 Ostatnia transakcja: ${plDateOnly(r.rcn_last_date)} • ${ppm(r.rcn_last_ppm)}`);
   }
   if (r.phone) lines.push(`☎️ <b>${escapeHtml(r.phone)}</b>`);
-  if (r.parcel_number) lines.push(`🗺 nr działki: <b>${escapeHtml(r.parcel_number)}</b>`);
+  if (r.parcel_number) lines.push(`🗺 Nr działki: <b>${escapeHtml(r.parcel_number)}</b>`);
+  lines.push(`🌐 <b>${escapeHtml(r.source || '?')}</b>`);
   return lines.join('\n');
 }
+
 
 function escapeHtml(v) {
   return String(v ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 }
 
-function mainMenu(origin) {
-  return {
-    inline_keyboard: [
-      [{ text: '🏡 OTWÓRZ APLIKACJĘ', web_app: { url: origin } }],
-      [{ text: '🆕 Najnowsze', callback_data: 'list:new' }, { text: '🔥 Okazje', callback_data: 'list:deals' }],
-      [{ text: '🌲 Prywatne', callback_data: 'list:private' }, { text: '📐 Duże 1500+', callback_data: 'list:large' }],
-      [{ text: '🚗 Garaże', callback_data: 'list:garages' }, { text: '📊 Status', callback_data: 'status' }],
-      [{ text: '🔄 Skanuj teraz', callback_data: 'scan' }],
-    ],
-  };
+function mainMenu(origin, role = 'user') {
+  const rows = [
+    [{ text: '🏡 OTWÓRZ MINI APP', web_app: { url: origin } }],
+    [{ text: '🆕 Nowe ogłoszenia', callback_data: 'list:new' }, { text: '📉 Zmiany cen', callback_data: 'list:price' }],
+    [{ text: '🤖 Status bota', callback_data: 'status:short' }, { text: '🗃 Status bazy', callback_data: 'database' }],
+  ];
+  if (role === 'admin') rows.push([{ text: '🧪 Diagnostyka', callback_data: 'diag' }]);
+  return { inline_keyboard: rows };
 }
 
-async function stats(env) {
+
+function plDateOnly(v) {
+  if (!v) return '—';
+  try { return new Intl.DateTimeFormat('pl-PL', { timeZone:'Europe/Warsaw', dateStyle:'short' }).format(new Date(v)); } catch { return String(v).slice(0,10); }
+}
+
+function plDate(v) {
+  if (!v) return 'brak';
+  try { return new Intl.DateTimeFormat('pl-PL', { timeZone: 'Europe/Warsaw', dateStyle: 'short', timeStyle: 'short' }).format(new Date(v)); }
+  catch { return String(v); }
+}
+
+async function systemState(env) {
+  try {
+    const rows = (await env.DB.prepare(`SELECT key,value,updated_at FROM system_state`).all()).results || [];
+    return Object.fromEntries(rows.map(x => [x.key, { value:x.value, updated_at:x.updated_at }]));
+  } catch { return {}; }
+}
+
+async function databaseStats(env) {
   const total = await env.DB.prepare(`SELECT
-      COUNT(*) total,
-      SUM(CASE WHEN category='plot' THEN 1 ELSE 0 END) plots,
-      SUM(CASE WHEN category='garage' THEN 1 ELSE 0 END) garages,
-      SUM(CASE WHEN deal_label LIKE '%OKAZJA%' THEN 1 ELSE 0 END) deals,
-      SUM(CASE WHEN privacy_score>=8 THEN 1 ELSE 0 END) private_count,
-      SUM(CASE WHEN category='plot' AND area_m2>=1500 THEN 1 ELSE 0 END) large_count,
-      SUM(CASE WHEN phone IS NOT NULL AND phone<>'' THEN 1 ELSE 0 END) with_phone
-    FROM listings WHERE active=1`).first();
-  const medRows = await env.DB.prepare(`SELECT price_m2 FROM listings WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 2000 ORDER BY price_m2`).all();
-  const vals = (medRows.results || []).map(x => Number(x.price_m2)).filter(Number.isFinite);
-  let med = null;
-  if (vals.length) {
-    const m = Math.floor(vals.length / 2);
-    med = vals.length % 2 ? vals[m] : (vals[m - 1] + vals[m]) / 2;
-  }
-  const last = await env.DB.prepare(`SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1`).first();
-  return { ...total, median_ppm: med, last_scan: last || null };
+      SUM(CASE WHEN active=1 AND category='plot' THEN 1 ELSE 0 END) plots,
+      SUM(CASE WHEN active=1 AND category='garage' THEN 1 ELSE 0 END) garages,
+      SUM(CASE WHEN active=0 OR source_status='archived' THEN 1 ELSE 0 END) archived,
+      SUM(CASE WHEN active=1 AND category='plot' AND published_at IS NOT NULL AND julianday(published_at)>=julianday('now','-30 day') THEN 1 ELSE 0 END) published30,
+      SUM(CASE WHEN active=1 AND category='plot' AND published_at IS NOT NULL AND julianday(published_at)>=julianday('now','-7 day') THEN 1 ELSE 0 END) published7,
+      SUM(CASE WHEN active=1 AND category='plot' AND published_at IS NULL THEN 1 ELSE 0 END) unknown_date,
+      SUM(CASE WHEN active=1 AND category='plot' AND phone IS NOT NULL AND phone<>'' THEN 1 ELSE 0 END) with_phone
+    FROM listings`).first();
+  const price = await env.DB.prepare(`SELECT AVG(price_m2) avg_ppm, MIN(price_m2) min_ppm, MAX(price_m2) max_ppm FROM listings WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 5000`).first();
+  const medRows = await env.DB.prepare(`SELECT price_m2 FROM listings WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 5000 ORDER BY price_m2`).all();
+  const vals=(medRows.results||[]).map(x=>Number(x.price_m2)).filter(Number.isFinite); let med=null;
+  if(vals.length){const m=Math.floor(vals.length/2);med=vals.length%2?vals[m]:(vals[m-1]+vals[m])/2;}
+  const rcn = await env.DB.prepare(`SELECT AVG(price_m2) avg_rcn, COUNT(*) rcn_count, MAX(transaction_date) rcn_last_date FROM rcn_transactions WHERE price_m2 BETWEEN 0.1 AND 5000 AND julianday(transaction_date)>=julianday('now','-24 months')`).first();
+  const rcnLast = await env.DB.prepare(`SELECT price_m2 rcn_last_ppm, transaction_date, parcel_number FROM rcn_transactions WHERE price_m2 BETWEEN 0.1 AND 5000 AND julianday(transaction_date)>=julianday('now','-24 months') ORDER BY transaction_date DESC LIMIT 1`).first();
+  const rcnRows=await env.DB.prepare(`SELECT price_m2 FROM rcn_transactions WHERE price_m2 BETWEEN 0.1 AND 5000 AND julianday(transaction_date)>=julianday('now','-24 months') ORDER BY price_m2`).all();
+  const rv=(rcnRows.results||[]).map(x=>Number(x.price_m2)).filter(Number.isFinite);let rmed=null;
+  if(rv.length){const m=Math.floor(rv.length/2);rmed=rv.length%2?rv[m]:(rv[m-1]+rv[m])/2;}
+  const localities=(await env.DB.prepare(`SELECT COALESCE(NULLIF(area_locality,''),NULLIF(location,''),'?') name, COUNT(*) n FROM listings WHERE active=1 AND category='plot' GROUP BY name ORDER BY n DESC LIMIT 20`).all()).results||[];
+  const last=await env.DB.prepare(`SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1`).first();
+  return {...total,...price,median_ppm:med,rcn_median_ppm:rmed,rcn_mean_ppm:rcn?.avg_rcn||null,rcn_count:rcn?.rcn_count||0,rcn_last_date:rcn?.rcn_last_date||null,rcn_last_ppm:rcnLast?.rcn_last_ppm||null,rcn_last_parcel:rcnLast?.parcel_number||null,localities,last_scan:last||null};
+}
+
+function parseDiag(last) {
+  try { return JSON.parse(last?.diagnostics_json || '[]'); } catch { return []; }
+}
+
+function nextScanLabel() {
+  const hour=Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Warsaw',hour:'2-digit',hour12:false}).format(new Date()));
+  if(hour<9)return 'dzisiaj 09:00'; if(hour<20)return 'dzisiaj 20:00'; return 'jutro 09:00';
+}
+
+async function botStatus(env) {
+  const db=await databaseStats(env);const st=await systemState(env);const last=db.last_scan;const diags=parseDiag(last);
+  let scanState=st.scan_status?.value||'idle';
+  const started=st.scan_started_at?.value; if(scanState==='running'&&started){const age=(Date.now()-new Date(started).getTime())/60000;if(age>70)scanState='stale';}
+  return {...db,system:st,scan_state:scanState,diagnostics:diags,next_scan:nextScanLabel()};
+}
+
+function statusShortText(s) {
+  const running=s.scan_state==='running'; const stale=s.scan_state==='stale';
+  const icon=running?'🟡':stale?'🔴':'🟢';
+  return [`🤖 <b>STATUS BOTA</b>`,`${icon} Stan: <b>${running?'SKANUJE':stale?'ZAWIESZONY/STALE':'GOTOWY'}</b>`,`🔎 Ostatni skan: ${plDate(s.last_scan?.finished_at)}`,
+    `🌐 Źródła: ${s.last_scan?`${s.last_scan.healthy_sources||0}/${s.last_scan.total_sources||0}`:'—'} • ${escapeHtml(s.last_scan?.status||'—')}`,
+    `⚠️ Błędy źródeł: ${(s.diagnostics||[]).filter(x=>!x.healthy).length}`,`⏰ Następny: <b>${s.next_scan}</b> • harmonogram 09:00 / 20:00`].join('\n');
+}
+
+function statusLongText(s) {
+  const bad=(s.diagnostics||[]).filter(x=>!x.healthy);const good=(s.diagnostics||[]).filter(x=>x.healthy);
+  const sourceLines=(s.diagnostics||[]).map(x=>`${x.healthy?'✅':'⚠️'} ${escapeHtml(x.source||'?')}: rekordy ${x.records??0}, linki ${x.discovered_links??0}, detail ${x.detail_pages_ok??0}${x.blocked?` • blokady ${x.blocked}`:''}${x.fatal?` • ${escapeHtml(x.fatal)}`:''}`);
+  return [`📋 <b>PEŁNY STATUS BOTA</b>`,``,`🤖 Stan skanera: <b>${escapeHtml(s.scan_state||'idle')}</b>`,`⚙️ Faza: ${escapeHtml(s.system?.scan_phase?.value||'—')}`,
+    `▶️ Start bieżącego/ostatniego: ${plDate(s.system?.scan_started_at?.value)}`,`✅ Ostatni zakończony: ${plDate(s.last_scan?.finished_at)}`,
+    `⏱ Ostatni skan: ${s.last_scan?`${Math.max(0,Math.round((new Date(s.last_scan.finished_at)-new Date(s.last_scan.started_at))/60000))} min`:'—'}`,
+    `🌐 Źródła OK: <b>${good.length}/${s.diagnostics?.length||0}</b> • błędne/niepewne: <b>${bad.length}</b>`,``,...sourceLines,
+    ``,`📦 Ostatni skan: pobrano ${s.last_scan?.downloaded_records??'—'} • przyjęto ${s.last_scan?.accepted_records??'—'} • nowe ${s.last_scan?.new_count??'—'} • istotne zmiany cen ${s.last_scan?.price_change_count??'—'}`,
+    `🚫 Odrzucone ${s.last_scan?.rejected_count??'—'} • wygaszone ${s.last_scan?.deactivated_count??'—'}`,
+    ``,`⏰ Następny: <b>${s.next_scan}</b> • maks. 2 skany/dzień`,`🧯 Ostatni błąd: ${escapeHtml(s.system?.last_error?.value||'brak')}`].join('\n');
+}
+
+function databaseStatusText(s) {
+  const loc=(s.localities||[]).map(x=>`${escapeHtml(x.name)}: <b>${x.n}</b>`).join(' • ')||'—';
+  return [`🗃 <b>STATUS BAZY</b>`,`🏡 Aktywne działki: <b>${s.plots||0}</b> • garaże: ${s.garages||0}`,`🕘 Dodane ≤7 dni: ${s.published7||0} • ≤30 dni: <b>${s.published30||0}</b>`,`❓ Bez daty publikacji: ${s.unknown_date||0} • archiwalne/nieaktywne: ${s.archived||0}`,
+    `☎️ Z telefonem: ${s.with_phone||0}`,``,`📢 <b>CENY Z OGŁOSZEŃ</b>`,`mediana: <b>${s.median_ppm==null?'—':ppm(s.median_ppm)}</b> • średnia: ${s.avg_ppm==null?'—':ppm(s.avg_ppm)}`,
+    ``,`🏛 <b>REALNE TRANSAKCJE RCN — 24 mies.</b>`,`mediana: <b>${s.rcn_median_ppm==null?'—':ppm(s.rcn_median_ppm)}</b> • średnia: ${s.rcn_mean_ppm==null?'—':ppm(s.rcn_mean_ppm)}`,`transakcje: ${s.rcn_count||0} • ostatnia: ${plDateOnly(s.rcn_last_date)}${s.rcn_last_ppm?` • ${ppm(s.rcn_last_ppm)}`:''}`,
+    ``,`📍 <b>AKTYWNE WG MIEJSCOWOŚCI</b>`,loc].join('\n');
 }
 
 async function listForBot(env, mode) {
-  let where = "active=1";
-  let order = "first_seen DESC";
-  if (mode === 'deals') { where += " AND deal_label LIKE '%OKAZJA%'"; order = 'price_m2 ASC'; }
-  if (mode === 'private') { where += " AND category='plot' AND privacy_score>=8"; order = 'privacy_score DESC, first_seen DESC'; }
-  if (mode === 'large') { where += " AND category='plot' AND area_m2>=1500"; order = 'area_m2 DESC'; }
-  if (mode === 'garages') { where += " AND category='garage'"; order = 'first_seen DESC'; }
-  return (await env.DB.prepare(`SELECT * FROM listings WHERE ${where} ORDER BY ${order} LIMIT 5`).all()).results || [];
+  if(mode==='price') return (await env.DB.prepare(`SELECT * FROM listings WHERE last_meaningful_price_change_at IS NOT NULL AND julianday(last_meaningful_price_change_at)>=julianday('now','-30 days') ORDER BY last_meaningful_price_change_at DESC LIMIT 6`).all()).results||[];
+  return (await env.DB.prepare(`SELECT * FROM listings WHERE active=1 AND category='plot' AND published_at IS NOT NULL AND julianday(published_at)>=julianday('now','-3 day') ORDER BY published_at DESC LIMIT 6`).all()).results||[];
+}
+
+function haversineKm(lat1,lon1,lat2,lon2){
+  const R=6371.0088,toRad=x=>Number(x)*Math.PI/180;
+  const p1=toRad(lat1),p2=toRad(lat2),dp=toRad(Number(lat2)-Number(lat1)),dl=toRad(Number(lon2)-Number(lon1));
+  const a=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;return 2*R*Math.asin(Math.sqrt(a));
+}
+
+async function nearbyRcn(env,listing){
+  if(!listing?.lat||!listing?.lon)return [];
+  const rows=(await env.DB.prepare(`SELECT transaction_date,price,area_m2,price_m2,parcel_number,mpzp,use_type,address,lat,lon FROM rcn_transactions WHERE lat IS NOT NULL AND lon IS NOT NULL AND julianday(transaction_date)>=julianday('now','-24 months') ORDER BY transaction_date DESC LIMIT 2500`).all()).results||[];
+  const targetArea=Number(listing.area_m2||0),limitRadius=Number(listing.rcn_radius_km||10);
+  return rows.map(t=>({...t,distance_km:haversineKm(listing.lat,listing.lon,t.lat,t.lon)})).filter(t=>{
+    if(t.distance_km>limitRadius)return false;
+    if(targetArea&&t.area_m2){const ratio=Number(t.area_m2)/targetArea;if(ratio<0.5||ratio>2)return false;}
+    return true;
+  }).sort((a,b)=>new Date(b.transaction_date||0)-new Date(a.transaction_date||0)).slice(0,8);
 }
 
 async function dispatchScan(env) {
@@ -289,105 +371,66 @@ async function dispatchScan(env) {
 }
 
 async function handleTelegram(req, env) {
-  const secret = req.headers.get('X-Telegram-Bot-Api-Secret-Token') || '';
-  if (!env.TELEGRAM_WEBHOOK_SECRET || !timingSafeEqual(secret, env.TELEGRAM_WEBHOOK_SECRET)) {
-    return new Response('forbidden', { status: 403 });
+  const secret=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';
+  if(!env.TELEGRAM_WEBHOOK_SECRET||!timingSafeEqual(secret,env.TELEGRAM_WEBHOOK_SECRET))return new Response('forbidden',{status:403});
+  const update=await req.json();const callback=update.callback_query;const msg=update.message;
+  const chatId=String(callback?.message?.chat?.id||msg?.chat?.id||'');const userId=String(callback?.from?.id||msg?.from?.id||'');const role=telegramRole(env,userId);const origin=new URL(req.url).origin;
+  async function send(text,markup=mainMenu(origin,role)){if(!chatId)return;await telegramApi(env,'sendMessage',{chat_id:chatId,text,parse_mode:'HTML',disable_web_page_preview:true,reply_markup:markup});}
+  async function sendListing(r,mode='new'){
+    if(!chatId)return;
+    const markup={inline_keyboard:[[{text:'🔗 Ogłoszenie',url:r.canonical_url},{text:'🏡 Mini App',web_app:{url:origin}}]]};
+    const text=listingText(r,mode);
+    if(r.image_url){
+      try{await telegramApi(env,'sendPhoto',{chat_id:chatId,photo:r.image_url,caption:text.slice(0,1000),parse_mode:'HTML',reply_markup:markup});return;}catch(e){console.warn('sendPhoto fallback',e?.message||e);}
+    }
+    await send(text,markup);
   }
-  const update = await req.json();
-  const callback = update.callback_query;
-  const msg = update.message;
-  const chatId = String(callback?.message?.chat?.id || msg?.chat?.id || '');
-  const userId = String(callback?.from?.id || msg?.from?.id || '');
-  const role = telegramRole(env, userId);
-  const origin = new URL(req.url).origin;
-
-  async function send(text, markup = mainMenu(origin)) {
-    if (!chatId) return;
-    await telegramApi(env, 'sendMessage', {
-      chat_id: chatId,
-      text,
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-      reply_markup: markup,
-    });
-  }
-
-  const incomingText = (msg?.text || '').trim().toLowerCase();
-  // /id is intentionally available before allow-listing so a new user can send
-  // their Telegram user_id to the administrator.
-  if (!callback && incomingText === '/id') {
-    await send(`chat_id: <code>${escapeHtml(chatId)}</code>
-user_id: <code>${escapeHtml(userId)}</code>`, { inline_keyboard: [] });
-    return new Response('ok');
-  }
-  if (!role) {
-    await send(`⛔ Brak dostępu.\nTwój user_id: <code>${escapeHtml(userId)}</code>\nDodaj ten numer w Cloudflare do <code>TELEGRAM_ADMINS</code> albo <code>TELEGRAM_USERS</code>.`, { inline_keyboard: [] });
-    return new Response('ok');
-  }
-
-  if (!callback && incomingText === '/diag') {
-    let db = 'OK';
-    try { await env.DB.prepare('SELECT 1 AS ok').first(); } catch (e) { db = 'BŁĄD: ' + String(e?.message || e); }
-    const gh = !!(env.GITHUB_DISPATCH_TOKEN && env.GITHUB_REPO && !String(env.GITHUB_REPO).includes('PUT_'));
-    const adminIds = [...parseIdList(env.TELEGRAM_ADMINS)].join(', ') || '—';
-    const userIds = [...parseIdList(env.TELEGRAM_USERS)].join(', ') || '—';
-    const legacyIds = [...parseIdList(env.TELEGRAM_ALLOWED_USER_ID)].join(', ') || '—';
-    await send(`🧪 <b>DIAGNOSTYKA</b>
-user_id: <code>${escapeHtml(userId)}</code>
-rola: <b>${escapeHtml(role || 'BRAK')}</b>
+  const text=(msg?.text||'').trim().toLowerCase();
+  if(!callback&&text==='/id'){await send(`chat_id: <code>${escapeHtml(chatId)}</code>
+user_id: <code>${escapeHtml(userId)}</code>`,{inline_keyboard:[]});return new Response('ok');}
+  if(!role){await send(`⛔ Brak dostępu.
+Twój user_id: <code>${escapeHtml(userId)}</code>`,{inline_keyboard:[]});return new Response('ok');}
+  if(callback){
+    try{await telegramApi(env,'answerCallbackQuery',{callback_query_id:callback.id});}catch{}
+    const data=callback.data||'';
+    if(data==='status:short'){const s=await botStatus(env);await send(statusShortText(s),{inline_keyboard:[[{text:'📋 Pełny status',callback_data:'status:long'}],[{text:'⬅️ Menu',callback_data:'menu'}]]});return new Response('ok');}
+    if(data==='status:long'){const s=await botStatus(env);await send(statusLongText(s),{inline_keyboard:[[{text:'📊 Krótki status',callback_data:'status:short'}],[{text:'⬅️ Menu',callback_data:'menu'}]]});return new Response('ok');}
+    if(data==='database'){await send(databaseStatusText(await databaseStats(env)));return new Response('ok');}
+    if(data==='menu'){await send(`🏡 <b>PROPERTY RADAR</b>\nWybierz funkcję:`,mainMenu(origin,role));return new Response('ok');}
+    if(data==='diag'){
+      if(role!=='admin'){await send('⛔ Diagnostyka tylko dla administratora.');return new Response('ok');}
+      let db='OK';try{await env.DB.prepare('SELECT 1').first();}catch(e){db='BŁĄD: '+String(e?.message||e)}
+      const gh=!!(env.GITHUB_DISPATCH_TOKEN&&env.GITHUB_REPO&&!String(env.GITHUB_REPO).includes('PUT_'));
+      await send(`🧪 <b>DIAGNOSTYKA</b>
 D1: <b>${escapeHtml(db)}</b>
-GitHub scan trigger: <b>${gh ? 'OK' : 'BRAK GITHUB_DISPATCH_TOKEN'}</b>
-Webhook secret: <b>${env.TELEGRAM_WEBHOOK_SECRET ? 'OK' : 'BRAK'}</b>
-Admins: <code>${escapeHtml(adminIds)}</code>
-Users: <code>${escapeHtml(userIds)}</code>
-Legacy: <code>${escapeHtml(legacyIds)}</code>`, { inline_keyboard: [] });
-    return new Response('ok');
-  }
-
-  if (callback) {
-    try { await telegramApi(env, 'answerCallbackQuery', { callback_query_id: callback.id }); } catch {}
-    const data = callback.data || '';
-    if (data === 'status') {
-      const s = await stats(env);
-      const ls = s.last_scan;
-      await send(`📊 <b>Property Radar</b>\n🟢 Aktywne: <b>${s.total || 0}</b>\n🌱 Działki: ${s.plots || 0} • 🚗 Garaże: ${s.garages || 0}\n🔥 Okazje: ${s.deals || 0} • 🌲 Prywatne 8+: ${s.private_count || 0}\n☎️ Z telefonem: ${s.with_phone || 0}\n📈 Mediana: ${s.median_ppm == null ? '—' : ppm(s.median_ppm)}\n🕒 Ostatni skan: ${escapeHtml(ls?.finished_at || 'brak')}`);
-      return new Response('ok');
+GitHub trigger: <b>${gh?'OK':'BRAK'}</b>
+Webhook: <b>${env.TELEGRAM_WEBHOOK_SECRET?'OK':'BRAK'}</b>
+Rola: <b>${escapeHtml(role)}</b>
+user_id: <code>${escapeHtml(userId)}</code>`,{inline_keyboard:[[{text:'⬅️ Menu',callback_data:'menu'}]]});return new Response('ok');
     }
-    if (data === 'scan') {
-      if (role !== 'admin') {
-        await send('⛔ Tylko administrator może uruchomić skan.');
-        return new Response('ok');
-      }
-      const d = await dispatchScan(env);
-      await send(d.ok ? `🔄 ${escapeHtml(d.message)}` : `⚠️ ${escapeHtml(d.message)}`);
-      return new Response('ok');
-    }
-    if (data.startsWith('list:')) {
-      const mode = data.slice(5);
-      const rows = await listForBot(env, mode);
-      if (!rows.length) await send('Brak ofert dla tego filtra.');
-      for (const r of rows) {
-        await send(listingText(r), { inline_keyboard: [[{ text: '🔗 Ogłoszenie', url: r.canonical_url }, { text: '🏡 Aplikacja', web_app: { url: origin } }]] });
-      }
-      return new Response('ok');
+    if(data.startsWith('list:')){
+      const mode=data.slice(5);const rows=await listForBot(env,mode);if(!rows.length){await send(mode==='price'?'Brak istotnych zmian cen.':'Brak faktycznie nowych ogłoszeń.');return new Response('ok');}
+      for(const r of rows)await sendListing(r,mode==='price'?'price':'new');return new Response('ok');
     }
   }
-
-  const text = incomingText;
-  if (text === '/status') {
-    const s = await stats(env);
-    await send(`📊 <b>Property Radar</b>\nAktywne: <b>${s.total || 0}</b>\nDziałki: ${s.plots || 0} • Garaże: ${s.garages || 0}\nOkazje: ${s.deals || 0}\nMediana: ${s.median_ppm == null ? '—' : ppm(s.median_ppm)}`);
-  } else if (text === '/skanuj') {
-    if (role !== 'admin') {
-      await send('⛔ Tylko administrator może uruchomić skan.');
-    } else {
-      const d = await dispatchScan(env);
-      await send(d.ok ? `🔄 ${escapeHtml(d.message)}` : `⚠️ ${escapeHtml(d.message)}`);
-    }
-  } else {
-    const s = await stats(env);
-    await send(`🏡 <b>Property Radar</b>\nZdonia / Zakliczyn / Słona + bliskie okolice\n\n🟢 Aktywne: <b>${s.total || 0}</b>\n🌱 Działki: ${s.plots || 0} • 🚗 Garaże: ${s.garages || 0}\n🔥 Okazje: ${s.deals || 0} • 🌲 Prywatne 8+: ${s.private_count || 0}\n📐 Duże 1500+: ${s.large_count || 0}`);
-  }
+  if(text==='/diag'){
+    if(role!=='admin'){await send('⛔ Diagnostyka tylko dla administratora.');return new Response('ok');}
+    let db='OK';try{await env.DB.prepare('SELECT 1').first();}catch(e){db='BŁĄD: '+String(e?.message||e)}
+    await send(`🧪 <b>DIAGNOSTYKA</b>
+D1: ${escapeHtml(db)}
+GitHub trigger: ${env.GITHUB_DISPATCH_TOKEN?'OK':'BRAK'}
+user_id: <code>${escapeHtml(userId)}</code>`);
+  } else if(text==='/nowe'){
+    const rows=await listForBot(env,'new');if(!rows.length)await send('Brak faktycznie nowych ogłoszeń.');for(const r of rows)await sendListing(r,'new');
+  } else if(text==='/ceny'){
+    const rows=await listForBot(env,'price');if(!rows.length)await send('Brak istotnych zmian cen.');for(const r of rows)await sendListing(r,'price');
+  } else if(text==='/statuspelny') await send(statusLongText(await botStatus(env)));
+  else if(text==='/status') await send(statusShortText(await botStatus(env)),{inline_keyboard:[[{text:'📋 Pełny status',callback_data:'status:long'}],[{text:'⬅️ Menu',callback_data:'menu'}]]});
+  else if(text==='/baza') await send(databaseStatusText(await databaseStats(env)));
+  else if(text==='/skanuj'&&role==='admin'){const d=await dispatchScan(env);await send(d.ok?'🔄 Skan zlecony. Twardy limit pozostaje 2 zakończone skany/dzień.':`⚠️ ${escapeHtml(d.message)}`);}
+  else await send(`🏡 <b>PROPERTY RADAR</b>
+Alerty tylko dla faktycznie nowych publikacji i istotnych zmian ceny.
+Skan automatyczny: <b>09:00 / 20:00</b>.`,mainMenu(origin,role));
   return new Response('ok');
 }
 
@@ -416,17 +459,23 @@ async function handleApi(req, env, url) {
 
   if (url.pathname === '/api/me') return json({ ok: true, user });
 
-  if (url.pathname === '/api/stats') return json(await stats(env));
+  if (url.pathname === '/api/stats') return json(await databaseStats(env));
 
   if (url.pathname === '/api/listings') {
-    const rows = await env.DB.prepare(`SELECT * FROM listings WHERE active=1 ORDER BY first_seen DESC, id DESC LIMIT 1500`).all();
-    return json({ listings: rows.results || [], stats: await stats(env) });
+    const rows = await env.DB.prepare(`SELECT * FROM listings ORDER BY COALESCE(published_at,first_seen) DESC, id DESC LIMIT 2500`).all();
+    return json({ listings: rows.results || [], stats: await databaseStats(env) });
   }
 
   const m = url.pathname.match(/^\/api\/listing\/(\d+)\/history$/);
   if (m) {
     const rows = await env.DB.prepare(`SELECT seen_at, price FROM price_history WHERE listing_id=? ORDER BY seen_at ASC`).bind(Number(m[1])).all();
     return json({ history: rows.results || [] });
+  }
+  const mr = url.pathname.match(/^\/api\/listing\/(\d+)\/rcn$/);
+  if (mr) {
+    const listing=await env.DB.prepare(`SELECT id,lat,lon,area_m2,rcn_radius_km FROM listings WHERE id=?`).bind(Number(mr[1])).first();
+    if(!listing)return json({error:'listing not found'},404);
+    return json({transactions:await nearbyRcn(env,listing)});
   }
 
   if (url.pathname === '/api/scan' && req.method === 'POST') {

@@ -92,10 +92,10 @@ async function authUser(req, env) {
 }
 
 function parseIdList(value) {
-  return new Set(String(value || '')
-    .split(/[\s,;]+/)
-    .map((x) => x.trim())
-    .filter(Boolean));
+  // Forgiving parser for values pasted from Telegram/Cloudflare.
+  // Accepts: 371510211, "371510211", user_id: 371510211 and CSV lists.
+  const matches = String(value || '').match(/-?\d+/g) || [];
+  return new Set(matches.map((x) => String(Number(x))));
 }
 
 function telegramRole(env, userId) {
@@ -238,10 +238,19 @@ async function listForBot(env, mode) {
 }
 
 async function dispatchScan(env) {
-  if (!env.GITHUB_DISPATCH_TOKEN || !env.GITHUB_REPO || env.GITHUB_REPO.includes('PUT_')) {
-    return { ok: false, code: 'github_dispatch_not_configured', message: 'Worker nie ma GITHUB_DISPATCH_TOKEN albo GITHUB_REPO. Dodaj GITHUB_DISPATCH_TOKEN jako Secret w Cloudflare Workerze.' };
+  const repo = String(env.GITHUB_REPO || '').trim();
+  if (!env.GITHUB_DISPATCH_TOKEN || !repo || repo.includes('PUT_')) {
+    return {
+      ok: false,
+      code: 'github_dispatch_not_configured',
+      http_status: 503,
+      message: !env.GITHUB_DISPATCH_TOKEN
+        ? 'Brak GITHUB_DISPATCH_TOKEN w Cloudflare Worker → Settings → Variables & Secrets.'
+        : 'Brak poprawnego GITHUB_REPO w Cloudflare Worker.'
+    };
   }
-  const r = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/actions/workflows/scan.yml/dispatches`, {
+
+  const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/scan.yml/dispatches`, {
     method: 'POST',
     headers: {
       'authorization': `Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
@@ -252,8 +261,31 @@ async function dispatchScan(env) {
     },
     body: JSON.stringify({ ref: 'main' }),
   });
-  if (r.status === 204) return { ok: true, message: 'Skan został uruchomiony na GitHub Actions.' };
-  return { ok: false, message: `GitHub zwrócił ${r.status}: ${(await r.text()).slice(0, 250)}` };
+
+  const raw = await r.text();
+  let body = null;
+  if (raw) {
+    try { body = JSON.parse(raw); } catch { body = raw; }
+  }
+
+  // GitHub historically returned 204. Newer API versions can return 200.
+  if (r.ok) {
+    return {
+      ok: true,
+      status: r.status,
+      workflow_run_id: body && typeof body === 'object' ? body.workflow_run_id || null : null,
+      run_url: body && typeof body === 'object' ? body.html_url || body.run_url || null : null,
+      message: 'Skan został uruchomiony na GitHub Actions.'
+    };
+  }
+
+  const detail = body && typeof body === 'object' ? (body.message || JSON.stringify(body)) : String(body || '');
+  return {
+    ok: false,
+    code: 'github_dispatch_failed',
+    http_status: r.status,
+    message: `GitHub API ${r.status}: ${detail.slice(0, 350)}`
+  };
 }
 
 async function handleTelegram(req, env) {
@@ -297,7 +329,18 @@ user_id: <code>${escapeHtml(userId)}</code>`, { inline_keyboard: [] });
     let db = 'OK';
     try { await env.DB.prepare('SELECT 1 AS ok').first(); } catch (e) { db = 'BŁĄD: ' + String(e?.message || e); }
     const gh = !!(env.GITHUB_DISPATCH_TOKEN && env.GITHUB_REPO && !String(env.GITHUB_REPO).includes('PUT_'));
-    await send(`🧪 <b>DIAGNOSTYKA</b>\nuser_id: <code>${escapeHtml(userId)}</code>\nrola: <b>${escapeHtml(role || 'BRAK')}</b>\nD1: <b>${escapeHtml(db)}</b>\nGitHub scan trigger: <b>${gh ? 'OK' : 'BRAK GITHUB_DISPATCH_TOKEN'}</b>\nWebhook secret: <b>${env.TELEGRAM_WEBHOOK_SECRET ? 'OK' : 'BRAK'}</b>`, { inline_keyboard: [] });
+    const adminIds = [...parseIdList(env.TELEGRAM_ADMINS)].join(', ') || '—';
+    const userIds = [...parseIdList(env.TELEGRAM_USERS)].join(', ') || '—';
+    const legacyIds = [...parseIdList(env.TELEGRAM_ALLOWED_USER_ID)].join(', ') || '—';
+    await send(`🧪 <b>DIAGNOSTYKA</b>
+user_id: <code>${escapeHtml(userId)}</code>
+rola: <b>${escapeHtml(role || 'BRAK')}</b>
+D1: <b>${escapeHtml(db)}</b>
+GitHub scan trigger: <b>${gh ? 'OK' : 'BRAK GITHUB_DISPATCH_TOKEN'}</b>
+Webhook secret: <b>${env.TELEGRAM_WEBHOOK_SECRET ? 'OK' : 'BRAK'}</b>
+Admins: <code>${escapeHtml(adminIds)}</code>
+Users: <code>${escapeHtml(userIds)}</code>
+Legacy: <code>${escapeHtml(legacyIds)}</code>`, { inline_keyboard: [] });
     return new Response('ok');
   }
 
@@ -389,7 +432,7 @@ async function handleApi(req, env, url) {
   if (url.pathname === '/api/scan' && req.method === 'POST') {
     if (user.role !== 'admin' && user.uid !== 'web') return json({ error: 'admin required' }, 403);
     const d = await dispatchScan(env);
-    return json(d, d.ok ? 200 : 503);
+    return json(d, d.ok ? 200 : (d.http_status >= 400 && d.http_status <= 599 ? d.http_status : 502));
   }
 
   return json({ error: 'not found' }, 404);

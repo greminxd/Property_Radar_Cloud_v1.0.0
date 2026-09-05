@@ -97,7 +97,9 @@ Dodaj jako **Secrets**:
 - `PANEL_PASSWORD` — Twoje mocne hasło do panelu.
 - `SESSION_SECRET` — losowy sekret minimum ~40 znaków.
 - `TELEGRAM_BOT_TOKEN` — token z BotFather.
-- `TELEGRAM_ALLOWED_USER_ID` — Twój Telegram user_id.
+- `TELEGRAM_ADMINS` — lista Telegram user_id administratorów, np. `123,456`.
+- `TELEGRAM_USERS` — opcjonalna lista zwykłych użytkowników.
+- `TELEGRAM_ALLOWED_USER_ID` — tylko kompatybilność ze starą v1.0.0; po migracji można usunąć.
 - `TELEGRAM_WEBHOOK_SECRET` — drugi losowy sekret.
 
 Opcjonalnie, żeby działał przycisk **Skanuj teraz** z panelu/Telegrama:
@@ -120,7 +122,8 @@ Dodaj:
 - `CF_D1_DATABASE_ID` — Database ID z kroku 2.
 - `CF_D1_API_TOKEN` — token Cloudflare z uprawnieniami **D1 Read + D1 Write** dla tego konta.
 - `TELEGRAM_BOT_TOKEN` — ten sam token bota.
-- `TELEGRAM_CHAT_ID` — prywatny chat_id, na który mają iść alerty.
+- `TELEGRAM_CHAT_IDS` — lista chat_id odbiorców alertów, np. `123,456`.
+- `TELEGRAM_CHAT_ID` — zgodność wsteczna dla jednego odbiorcy.
 - `TELEGRAM_WEBHOOK_SECRET` — identyczny jak w Workerze.
 - `PANEL_URL` — np. `https://property-radar.hoolz.workers.dev`.
 

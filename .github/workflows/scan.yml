@@ -12,16 +12,20 @@ concurrency:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 55
     permissions:
       contents: read
+    defaults:
+      run:
+        working-directory: property_radar_cloud_v1
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: scraper/requirements.txt
+          cache-dependency-path: property_radar_cloud_v1/scraper/requirements.txt
       - name: Install Python dependencies
         run: pip install -r scraper/requirements.txt
       - name: Install Chromium
@@ -32,6 +36,7 @@ jobs:
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
           CF_D1_API_TOKEN: ${{ secrets.CF_D1_API_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PANEL_URL: ${{ secrets.PANEL_URL }}
         run: python scraper/main.py
@@ -40,5 +45,5 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: scan-diagnostics-${{ github.run_number }}
-          path: logs/
+          path: property_radar_cloud_v1/logs/
           retention-days: 14

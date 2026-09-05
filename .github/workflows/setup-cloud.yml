@@ -6,8 +6,12 @@ on:
 jobs:
   setup:
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       contents: read
+    defaults:
+      run:
+        working-directory: property_radar_cloud_v1
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6

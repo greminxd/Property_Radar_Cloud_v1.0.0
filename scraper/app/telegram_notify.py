@@ -2,10 +2,13 @@ from __future__ import annotations
 import html,requests
 
 class TelegramNotify:
-    def __init__(self,token,chat_id,panel_url=''):
-        self.token=token or ''; self.chat_id=str(chat_id or ''); self.panel_url=(panel_url or '').rstrip('/')
+    def __init__(self,token,chat_ids,panel_url=''):
+        self.token=token or ''
+        raw=str(chat_ids or '')
+        self.chat_ids=[x.strip() for x in raw.replace(';',',').split(',') if x.strip()]
+        self.panel_url=(panel_url or '').rstrip('/')
         self.s=requests.Session()
-    def ready(self): return bool(self.token and self.chat_id)
+    def ready(self): return bool(self.token and self.chat_ids)
     def send(self,text,listing_url=None):
         if not self.ready(): return False
         buttons=[]
@@ -13,10 +16,18 @@ class TelegramNotify:
         if listing_url: row.append({'text':'🔗 Ogłoszenie','url':listing_url})
         if self.panel_url: row.append({'text':'🏡 Aplikacja','web_app':{'url':self.panel_url}})
         if row: buttons.append(row)
-        payload={'chat_id':self.chat_id,'text':text,'parse_mode':'HTML','disable_web_page_preview':True}
-        if buttons: payload['reply_markup']={'inline_keyboard':buttons}
-        r=self.s.post(f'https://api.telegram.org/bot{self.token}/sendMessage',json=payload,timeout=30)
-        r.raise_for_status(); return True
+        sent=0
+        errors=[]
+        for chat_id in self.chat_ids:
+            payload={'chat_id':chat_id,'text':text,'parse_mode':'HTML','disable_web_page_preview':True}
+            if buttons: payload['reply_markup']={'inline_keyboard':buttons}
+            try:
+                r=self.s.post(f'https://api.telegram.org/bot{self.token}/sendMessage',json=payload,timeout=30)
+                r.raise_for_status(); sent+=1
+            except Exception as e:
+                errors.append(f'{chat_id}: {e}')
+        if errors and not sent: raise RuntimeError('; '.join(errors))
+        return bool(sent)
 
 def esc(x): return html.escape(str(x or ''))
 def money(v): return '?' if v is None else f"{v:,.0f} zł".replace(',',' ')

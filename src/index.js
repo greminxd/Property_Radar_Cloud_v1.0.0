@@ -54,9 +54,9 @@ function parseCookies(req) {
   return out;
 }
 
-async function createSession(env, uid = 'web') {
+async function createSession(env, uid = 'web', role = 'admin') {
   const days = Math.max(1, Number(env.SESSION_DAYS || 30));
-  const payloadObj = { uid: String(uid), exp: Math.floor(Date.now() / 1000) + days * 86400 };
+  const payloadObj = { uid: String(uid), role: String(role || 'user'), exp: Math.floor(Date.now() / 1000) + days * 86400 };
   const payload = b64urlEncode(enc.encode(JSON.stringify(payloadObj)));
   const sig = b64urlEncode(await hmacBytes(enc.encode(env.SESSION_SECRET), payload));
   return `${payload}.${sig}`;
@@ -91,7 +91,26 @@ async function authUser(req, env) {
   return await verifySession(env, token);
 }
 
-async function verifyTelegramInitData(initData, botToken, allowedUserId) {
+function parseIdList(value) {
+  return new Set(String(value || '')
+    .split(/[\s,;]+/)
+    .map((x) => x.trim())
+    .filter(Boolean));
+}
+
+function telegramRole(env, userId) {
+  const id = String(userId || '');
+  if (!id) return null;
+  const admins = parseIdList(env.TELEGRAM_ADMINS);
+  const users = parseIdList(env.TELEGRAM_USERS);
+  // Backward compatibility with Cloud v1.0.0.
+  const legacy = parseIdList(env.TELEGRAM_ALLOWED_USER_ID);
+  if (admins.has(id)) return 'admin';
+  if (users.has(id) || legacy.has(id)) return 'user';
+  return null;
+}
+
+async function verifyTelegramInitData(initData, botToken, env) {
   if (!initData || !botToken) return null;
   const params = new URLSearchParams(initData);
   const givenHash = params.get('hash');
@@ -109,8 +128,9 @@ async function verifyTelegramInitData(initData, botToken, allowedUserId) {
   try {
     const user = JSON.parse(params.get('user') || '{}');
     if (!user.id) return null;
-    if (allowedUserId && String(user.id) !== String(allowedUserId)) return null;
-    return user;
+    const role = telegramRole(env, user.id);
+    if (!role) return null;
+    return { ...user, role };
   } catch {
     return null;
   }
@@ -246,7 +266,7 @@ async function handleTelegram(req, env) {
   const msg = update.message;
   const chatId = String(callback?.message?.chat?.id || msg?.chat?.id || '');
   const userId = String(callback?.from?.id || msg?.from?.id || '');
-  if (env.TELEGRAM_ALLOWED_USER_ID && userId !== String(env.TELEGRAM_ALLOWED_USER_ID)) return new Response('ok');
+  const role = telegramRole(env, userId);
   const origin = new URL(req.url).origin;
 
   async function send(text, markup = mainMenu(origin)) {
@@ -260,6 +280,16 @@ async function handleTelegram(req, env) {
     });
   }
 
+  const incomingText = (msg?.text || '').trim().toLowerCase();
+  // /id is intentionally available before allow-listing so a new user can send
+  // their Telegram user_id to the administrator.
+  if (!callback && incomingText === '/id') {
+    await send(`chat_id: <code>${escapeHtml(chatId)}</code>
+user_id: <code>${escapeHtml(userId)}</code>`, { inline_keyboard: [] });
+    return new Response('ok');
+  }
+  if (!role) return new Response('ok');
+
   if (callback) {
     try { await telegramApi(env, 'answerCallbackQuery', { callback_query_id: callback.id }); } catch {}
     const data = callback.data || '';
@@ -270,6 +300,10 @@ async function handleTelegram(req, env) {
       return new Response('ok');
     }
     if (data === 'scan') {
+      if (role !== 'admin') {
+        await send('⛔ Tylko administrator może uruchomić skan.');
+        return new Response('ok');
+      }
       const d = await dispatchScan(env);
       await send(d.ok ? `🔄 ${escapeHtml(d.message)}` : `⚠️ ${escapeHtml(d.message)}`);
       return new Response('ok');
@@ -285,15 +319,17 @@ async function handleTelegram(req, env) {
     }
   }
 
-  const text = (msg?.text || '').trim().toLowerCase();
-  if (text === '/id') {
-    await send(`chat_id: <code>${escapeHtml(chatId)}</code>\nuser_id: <code>${escapeHtml(userId)}</code>`);
-  } else if (text === '/status') {
+  const text = incomingText;
+  if (text === '/status') {
     const s = await stats(env);
     await send(`📊 <b>Property Radar</b>\nAktywne: <b>${s.total || 0}</b>\nDziałki: ${s.plots || 0} • Garaże: ${s.garages || 0}\nOkazje: ${s.deals || 0}\nMediana: ${s.median_ppm == null ? '—' : ppm(s.median_ppm)}`);
   } else if (text === '/skanuj') {
-    const d = await dispatchScan(env);
-    await send(d.ok ? `🔄 ${escapeHtml(d.message)}` : `⚠️ ${escapeHtml(d.message)}`);
+    if (role !== 'admin') {
+      await send('⛔ Tylko administrator może uruchomić skan.');
+    } else {
+      const d = await dispatchScan(env);
+      await send(d.ok ? `🔄 ${escapeHtml(d.message)}` : `⚠️ ${escapeHtml(d.message)}`);
+    }
   } else {
     const s = await stats(env);
     await send(`🏡 <b>Property Radar</b>\nZdonia / Zakliczyn / Słona + bliskie okolice\n\n🟢 Aktywne: <b>${s.total || 0}</b>\n🌱 Działki: ${s.plots || 0} • 🚗 Garaże: ${s.garages || 0}\n🔥 Okazje: ${s.deals || 0} • 🌲 Prywatne 8+: ${s.private_count || 0}\n📐 Duże 1500+: ${s.large_count || 0}`);
@@ -312,10 +348,10 @@ async function handleApi(req, env, url) {
 
   if (url.pathname === '/api/auth/telegram' && req.method === 'POST') {
     const body = await req.json().catch(() => ({}));
-    const user = await verifyTelegramInitData(body.initData || '', env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_ALLOWED_USER_ID);
+    const user = await verifyTelegramInitData(body.initData || '', env.TELEGRAM_BOT_TOKEN, env);
     if (!user) return json({ error: 'Nieprawidłowe uwierzytelnienie Telegram' }, 401);
-    const token = await createSession(env, `tg:${user.id}`);
-    return json({ ok: true, user: { id: user.id, first_name: user.first_name || '' } }, 200, { 'set-cookie': sessionCookie(token, env) });
+    const token = await createSession(env, `tg:${user.id}`, user.role);
+    return json({ ok: true, user: { id: user.id, first_name: user.first_name || '', role: user.role } }, 200, { 'set-cookie': sessionCookie(token, env) });
   }
 
   if (url.pathname === '/api/logout' && req.method === 'POST') return json({ ok: true }, 200, { 'set-cookie': clearSessionCookie() });
@@ -340,6 +376,7 @@ async function handleApi(req, env, url) {
   }
 
   if (url.pathname === '/api/scan' && req.method === 'POST') {
+    if (user.role !== 'admin' && user.uid !== 'web') return json({ error: 'admin required' }, 403);
     const d = await dispatchScan(env);
     return json(d, d.ok ? 200 : 503);
   }

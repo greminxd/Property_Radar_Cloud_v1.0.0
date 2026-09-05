@@ -42,7 +42,7 @@ async def run():
     cfg=load_cfg(); started=datetime.now(timezone.utc).isoformat()
     db=CloudDB(need('CF_ACCOUNT_ID'),need('CF_D1_DATABASE_ID'),need('CF_D1_API_TOKEN')); db.begin_scan()
     database_was_new=db.count()==0
-    tg=TelegramNotify(os.getenv('TELEGRAM_BOT_TOKEN'),os.getenv('TELEGRAM_CHAT_ID'),os.getenv('PANEL_URL',''))
+    tg=TelegramNotify(os.getenv('TELEGRAM_BOT_TOKEN'),os.getenv('TELEGRAM_CHAT_IDS') or os.getenv('TELEGRAM_CHAT_ID'),os.getenv('PANEL_URL',''))
     scraper=Scraper(cfg); geocoder=Geocoder(db,cfg['center'])
     all_recs=[]; errs=[]; diagnostics=[]; healthy_sources=[]
 

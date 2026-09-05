@@ -6,9 +6,9 @@ PROPERTY RADAR CLOUD — NAJSZYBSZA KOLEJNOŚĆ
 4. W wrangler.jsonc wpisz swój GitHub USER/repo w GITHUB_REPO.
 5. Cloudflare: Workers & Pages -> Create application -> Import repository -> property-radar.
 6. Worker Settings -> Variables & Secrets: dodaj PANEL_PASSWORD, SESSION_SECRET,
-   TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID, TELEGRAM_WEBHOOK_SECRET.
+   TELEGRAM_BOT_TOKEN, TELEGRAM_ADMINS, TELEGRAM_USERS (opcjonalnie), TELEGRAM_WEBHOOK_SECRET.
 7. GitHub repo -> Settings -> Actions secrets: dodaj CF_ACCOUNT_ID, CF_D1_DATABASE_ID,
-   CF_D1_API_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_WEBHOOK_SECRET, PANEL_URL.
+   CF_D1_API_TOKEN, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_IDS, TELEGRAM_WEBHOOK_SECRET, PANEL_URL.
 8. GitHub Actions -> Setup D1 + Telegram -> Run workflow.
 9. GitHub Actions -> Scan nieruchomosci -> Run workflow.
 10. Telegram -> /start -> przycisk "Oferty".

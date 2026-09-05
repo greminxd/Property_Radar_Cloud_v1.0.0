@@ -22,7 +22,7 @@ class CloudDB:
     def begin_scan(self): self.scan_started=self.now()
 
     def _post(self,payload):
-        r=self.session.post(self.url,json=payload,timeout=60)
+        r=self.session.post(self.url,json=payload,timeout=15)
         r.raise_for_status(); data=r.json()
         if not data.get('success',False):
             raise RuntimeError(json.dumps(data.get('errors') or data,ensure_ascii=False)[:1000])

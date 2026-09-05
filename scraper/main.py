@@ -39,15 +39,30 @@ def compute_privacy(rec,body):
     return score,'|'.join(reasons)
 
 async def run():
+    print('[BOOT] Property Radar scan start', flush=True)
     cfg=load_cfg(); started=datetime.now(timezone.utc).isoformat()
+    print('[BOOT] config OK', flush=True)
+    print('[BOOT] D1 preflight...', flush=True)
     db=CloudDB(need('CF_ACCOUNT_ID'),need('CF_D1_DATABASE_ID'),need('CF_D1_API_TOKEN')); db.begin_scan()
-    database_was_new=db.count()==0
+    try:
+        database_was_new=db.count()==0
+        print(f'[BOOT] D1 OK | database_new={database_was_new}', flush=True)
+    except Exception as e:
+        print(f'[FATAL] D1 preflight failed: {type(e).__name__}: {e}', flush=True)
+        raise
     tg=TelegramNotify(os.getenv('TELEGRAM_BOT_TOKEN'),os.getenv('TELEGRAM_CHAT_IDS') or os.getenv('TELEGRAM_CHAT_ID'),os.getenv('PANEL_URL',''))
     scraper=Scraper(cfg); geocoder=Geocoder(db,cfg['center'])
     all_recs=[]; errs=[]; diagnostics=[]; healthy_sources=[]
 
+    print('[BOOT] starting Playwright...', flush=True)
     async with async_playwright() as p:
-        browser=await p.chromium.launch(headless=True,args=['--disable-dev-shm-usage'])
+        print('[BOOT] launching Chromium...', flush=True)
+        try:
+            browser=await asyncio.wait_for(p.chromium.launch(headless=True,args=['--disable-dev-shm-usage']), timeout=30)
+        except Exception as e:
+            print(f'[FATAL] Chromium launch failed: {type(e).__name__}: {e}', flush=True)
+            raise
+        print('[BOOT] Chromium OK', flush=True)
         sem=asyncio.Semaphore(max(1,int(cfg['browser'].get('parallel_sources',3))))
         async def scan_one(source):
             async with sem:

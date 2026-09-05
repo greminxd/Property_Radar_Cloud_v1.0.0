@@ -35,7 +35,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           PANEL_URL: ${{ secrets.PANEL_URL }}
-        run: python scraper/main.py
+          PYTHONUNBUFFERED: "1"
+        run: python -u scraper/main.py
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v5

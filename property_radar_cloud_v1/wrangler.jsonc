@@ -13,11 +13,11 @@
     {
       "binding": "DB",
       "database_name": "property-radar-db",
-      "database_id": "PUT_D1_DATABASE_ID_HERE"
+      "database_id": "e51ddfdf-236a-4cf4-8e3e-6ee70f4e7019"
     }
   ],
   "vars": {
-    "GITHUB_REPO": "PUT_GITHUB_USER/property-radar",
+    "GITHUB_REPO": "greminxd/Property_Radar_Cloud_v1.0.0",
     "SESSION_DAYS": "30"
   }
 }

@@ -35,6 +35,37 @@
     </header>
 
     <main>
+      <section id="scanCommand" class="scan-command">
+        <div class="radar-orb" aria-hidden="true">
+          <div class="radar-ring r1"></div><div class="radar-ring r2"></div><div class="radar-ring r3"></div>
+          <div class="radar-sweep"></div><div class="radar-core">PR</div>
+        </div>
+        <div class="scan-main">
+          <div class="scan-title-row">
+            <div>
+              <span class="eyebrow">CENTRUM SKANOWANIA · LIVE</span>
+              <h2 id="scanHeadline">Radar gotowy</h2>
+            </div>
+            <span id="scanStateBadge" class="scan-state-badge ready"><i></i> GOTOWY</span>
+          </div>
+          <div id="scanPhase" class="scan-phase">Oczekiwanie na następny skan.</div>
+          <div class="scan-progress-track"><div id="scanProgressBar" class="scan-progress-bar"></div></div>
+          <div class="scan-live-metrics">
+            <div><span>Postęp</span><b id="scanProgressText">0 / 0</b></div>
+            <div><span>Pobrano</span><b id="scanDownloaded">0</b></div>
+            <div><span>Przyjęto live</span><b id="scanAccepted">0</b></div>
+            <div><span>Następny skan</span><b id="scanNext">—</b></div>
+          </div>
+          <div id="scanSources" class="scan-sources"></div>
+        </div>
+        <div class="scan-actions">
+          <button id="scanNowBtn" class="scan-btn primary-action">▶ <span>Skanuj teraz</span></button>
+          <button id="stopScanBtn" class="scan-btn stop-action" disabled>■ <span>Zatrzymaj</span></button>
+          <button id="refreshScanBtn" class="scan-btn subtle-action">↻ <span>Odśwież</span></button>
+          <small id="scanStarted">Ostatni skan: —</small>
+        </div>
+      </section>
+
       <section class="hero market-hero">
         <div class="hero-main">
           <span class="eyebrow">RYNEK OFERTOWY</span>

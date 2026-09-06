@@ -4,6 +4,10 @@ const tg = window.Telegram?.WebApp;
 let listings = [];
 let stats = {};
 let quick = '30d';
+let me = null;
+let scanStatus = null;
+let scanPollTimer = null;
+let listingsRefreshAt = 0;
 
 const state = {
   categories: new Set(), types: new Set(), planning: new Set(), localities: new Set(), sources: new Set(),
@@ -70,22 +74,28 @@ async function telegramAutoLogin(){
 }
 
 async function boot(){
-  try { await api('/api/me'); showApp(); return load(); }
+  try { const m=await api('/api/me'); me=m.user||null; showApp(); await load(); startScanPolling(); return; }
   catch(e){ if(e.status!==401) console.warn(e); }
-  if (await telegramAutoLogin()) { showApp(); return load(); }
+  if (await telegramAutoLogin()) { const m=await api('/api/me');me=m.user||null;showApp();await load();startScanPolling();return; }
   $('#login').classList.remove('hidden');
 }
-function showApp(){ $('#login').classList.add('hidden'); $('#app').classList.remove('hidden'); }
+function showApp(){
+  $('#login').classList.add('hidden'); $('#app').classList.remove('hidden');
+  const admin=me?.role==='admin'||me?.uid==='web';
+  $('#scanNowBtn').classList.toggle('hidden',!admin);
+  $('#stopScanBtn').classList.toggle('hidden',!admin);
+}
 $('#loginForm').addEventListener('submit', async (e)=>{
   e.preventDefault(); $('#loginError').textContent='';
-  try { await api('/api/login',{method:'POST',body:JSON.stringify({password:$('#password').value})}); showApp(); await load(); }
+  try { await api('/api/login',{method:'POST',body:JSON.stringify({password:$('#password').value})});me=(await api('/api/me')).user||null;showApp();await load();startScanPolling(); }
   catch(e){ $('#loginError').textContent=e.message; }
 });
 $('#logoutBtn').addEventListener('click', async()=>{try{await api('/api/logout',{method:'POST',body:'{}'})}finally{location.reload()}});
 
 async function load(){
-  const data=await api('/api/listings'); listings=data.listings||[]; stats=data.stats||{};
-  hydrateFilters(); renderStats(); syncStateToInputs(); render();
+  const [data,status]=await Promise.all([api('/api/listings'),api('/api/status').catch(()=>null)]);
+  listings=data.listings||[]; stats=data.stats||{}; scanStatus=status||scanStatus;
+  hydrateFilters(); renderStats(); syncStateToInputs(); render(); renderScanStatus();
 }
 
 function renderStats(){
@@ -101,6 +111,82 @@ function renderStats(){
   $('#statPhone').textContent=stats.with_phone||0;
   $('#lastScan').textContent=`Ostatni skan: ${dateTime(stats.last_scan?.finished_at)}${stats.last_scan?` • źródła OK ${stats.last_scan.healthy_sources||0}/${stats.last_scan.total_sources||0}`:''} • baza: ${stats.total_rows||0} rekordów / ${stats.plots||0} aktywnych działek`;
 }
+
+
+function scanStateInfo(state){
+  const m={
+    idle:['ready','GOTOWY','Radar gotowy'],
+    running:['running','SKANUJE','Skan w toku'],
+    queued:['queued','W KOLEJCE','Skan oczekuje'],
+    cancelling:['queued','ZATRZYMYWANIE','Zatrzymywanie skanu'],
+    cancelled:['cancelled','ZATRZYMANY','Skan zatrzymany'],
+    error:['error','BŁĄD','Skan zakończony błędem'],
+    stale:['error','STALE','Skan prawdopodobnie zawieszony']
+  };
+  return m[state]||['ready',String(state||'GOTOWY').toUpperCase(),'Radar'];
+}
+function renderScanStatus(){
+  if(!scanStatus)return;
+  const stateName=String(scanStatus.scan_state||'idle'), p=scanStatus.scan_progress||{};
+  const [cls,label,headline]=scanStateInfo(stateName);
+  const running=['running','queued','cancelling'].includes(stateName);
+  const done=Number(p.done_sources||0), total=Number(p.total_sources||0);
+  let pct=total?Math.min(100,Math.max(0,done/total*100)):(running?3:0);
+  if(stateName==='running'&&total&&done>=total)pct=92; // portale gotowe, ale trwa RCN/scoring/finalizacja
+  $('#scanCommand').classList.toggle('running',stateName==='running');
+  $('#scanHeadline').textContent=headline;
+  const badge=$('#scanStateBadge');badge.className=`scan-state-badge ${cls}`;badge.innerHTML=`<i></i> ${label}`;
+  $('#scanPhase').textContent=scanStatus.system?.scan_phase?.value||'Oczekiwanie na następny skan.';
+  $('#scanProgressBar').style.width=`${pct}%`;
+  $('#scanProgressText').textContent=total?`${done} / ${total}`:'—';
+  $('#scanDownloaded').textContent=Number(p.downloaded_records||0).toLocaleString('pl-PL');
+  $('#scanAccepted').textContent=Number(p.accepted_records||0).toLocaleString('pl-PL');
+  $('#scanNext').textContent=scanStatus.next_scan||'—';
+  $('#scanStarted').textContent=running?`Start: ${dateTime(scanStatus.system?.scan_started_at?.value)}`:`Ostatni skan: ${dateTime(scanStatus.last_scan?.finished_at)}`;
+  const src=Array.isArray(p.sources)?p.sources:[];
+  $('#scanSources').innerHTML=src.length?src.map(x=>{
+    const c=x.status==='done'?(x.healthy?'done':'warn'):x.status==='running'?'running':'';
+    const extra=x.status==='done'&&x.records!=null?` · ${x.records}`:'';
+    return `<span class="source-chip ${c}" title="${esc(x.error||'')}">${esc(x.name||'?')}${extra}</span>`;
+  }).join(''):'<span class="muted">Szczegółowy postęp pojawi się podczas skanu.</span>';
+  const admin=me?.role==='admin'||me?.uid==='web';
+  $('#scanNowBtn').disabled=!admin||running;
+  $('#stopScanBtn').disabled=!admin||!['running','queued'].includes(stateName);
+}
+async function pollScanStatus(forceListings=false){
+  try{
+    const previous=scanStatus?.scan_state;
+    scanStatus=await api('/api/status');renderScanStatus();
+    const running=['running','queued','cancelling'].includes(String(scanStatus.scan_state||''));
+    const now=Date.now();
+    // During a scan listings are refreshed repeatedly. New records from completed
+    // portals appear in the Mini App before the whole run finishes.
+    if(forceListings || (running && now-listingsRefreshAt>5000) || (previous==='running'&&!running)){
+      listingsRefreshAt=now;
+      const data=await api('/api/listings');listings=data.listings||[];stats=data.stats||{};
+      hydrateFilters();renderStats();render();
+    }
+  }catch(e){console.warn('scan poll',e);}
+}
+function startScanPolling(){
+  if(scanPollTimer)clearInterval(scanPollTimer);
+  pollScanStatus();
+  scanPollTimer=setInterval(()=>pollScanStatus(),2500);
+}
+async function startScanNow(){
+  const b=$('#scanNowBtn');b.disabled=true;
+  try{await api('/api/scan',{method:'POST',body:'{}'});toast('Skan zlecony');await pollScanStatus(true);}
+  catch(e){toast(e.message);}
+}
+async function stopCurrentScan(){
+  if(!confirm('Zatrzymać bieżący skan GitHub Actions? Dane zapisane do tej chwili zostaną w bazie.'))return;
+  const b=$('#stopScanBtn');b.disabled=true;
+  try{await api('/api/scan/stop',{method:'POST',body:'{}'});toast('Skan zatrzymany');await pollScanStatus(true);}
+  catch(e){toast(e.message);}
+}
+$('#scanNowBtn').addEventListener('click',startScanNow);
+$('#stopScanBtn').addEventListener('click',stopCurrentScan);
+$('#refreshScanBtn').addEventListener('click',()=>pollScanStatus(true));
 
 function choiceId(prefix,v){
   const raw=encodeURIComponent(v).replace(/%/g,''); return `${prefix}-${raw.slice(0,42)}`;

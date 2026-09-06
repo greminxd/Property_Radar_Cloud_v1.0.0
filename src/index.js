@@ -222,9 +222,12 @@ function mainMenu(origin, role = 'user') {
   const rows = [
     [{ text: '🏡 OTWÓRZ MINI APP', web_app: { url: origin } }],
     [{ text: '🆕 Nowe ogłoszenia', callback_data: 'list:new' }, { text: '📉 Zmiany cen', callback_data: 'list:price' }],
-    [{ text: '🤖 Status bota', callback_data: 'status:short' }, { text: '🗃 Status bazy', callback_data: 'database' }],
+    [{ text: '📡 Status skanu', callback_data: 'status:short' }, { text: '🗃 Baza', callback_data: 'database' }],
   ];
-  if (role === 'admin') { rows.push([{ text: '🔄 Skanuj teraz', callback_data: 'scan:run' }]); rows.push([{ text: '🧪 Diagnostyka', callback_data: 'diag' }]); }
+  if (role === 'admin') {
+    rows.push([{ text: '▶️ Skanuj teraz', callback_data: 'scan:run' }, { text: '⏹ Zatrzymaj skan', callback_data: 'scan:stop' }]);
+    rows.push([{ text: '🧪 Diagnostyka', callback_data: 'diag' }]);
+  }
   return { inline_keyboard: rows };
 }
 
@@ -328,27 +331,47 @@ async function botStatus(env) {
   const [db,st]=await Promise.all([databaseStats(env),systemState(env)]);const last=db.last_scan;const diags=parseDiag(last);
   let scanState=st.scan_status?.value||'idle';
   const started=st.scan_started_at?.value; if(scanState==='running'&&started){const age=(Date.now()-new Date(started).getTime())/60000;if(age>70)scanState='stale';}
-  return {...db,system:st,scan_state:scanState,diagnostics:diags,next_scan:nextScanLabel()};
+  let progress={};
+  try { progress=JSON.parse(st.scan_progress?.value||'{}')||{}; } catch {}
+  return {...db,system:st,scan_state:scanState,scan_progress:progress,diagnostics:diags,next_scan:nextScanLabel()};
 }
 
 function statusShortText(s) {
-  const running=s.scan_state==='running'; const stale=s.scan_state==='stale';
-  const icon=running?'🟡':stale?'🔴':'🟢';
-  return [`🤖 <b>STATUS BOTA</b>`,`${icon} Stan: <b>${running?'SKANUJE':stale?'ZAWIESZONY/STALE':'GOTOWY'}</b>`,`🔎 Ostatni skan: ${plDate(s.last_scan?.finished_at)}`,
-    `🌐 Źródła: ${s.last_scan?`${s.last_scan.healthy_sources||0}/${s.last_scan.total_sources||0}`:'—'} • ${escapeHtml(s.last_scan?.status||'—')}`,
-    `⚠️ Błędy źródeł: ${(s.diagnostics||[]).filter(x=>!x.healthy).length}`,`⏰ Następny: <b>${s.next_scan}</b> • harmonogram 09:00 / 20:00`].join('\n');
+  const state=String(s.scan_state||'idle');
+  const running=['running','queued','cancelling'].includes(state), stale=state==='stale';
+  const p=s.scan_progress||{}, done=Number(p.done_sources||0), total=Number(p.total_sources||0);
+  const pct=total?Math.round(done/total*100):0;
+  const icon=state==='running'?'🟡':state==='queued'?'🟠':state==='cancelling'?'🟣':state==='cancelled'?'⚫':stale?'🔴':'🟢';
+  const label=state==='running'?'SKANUJE':state==='queued'?'W KOLEJCE':state==='cancelling'?'ZATRZYMYWANIE':state==='cancelled'?'ZATRZYMANY':stale?'ZAWIESZONY':'GOTOWY';
+  const live=running&&total?`\n📊 Postęp: <b>${done}/${total} (${pct}%)</b> • rekordy live: ${p.accepted_records||0}`:'';
+  return [`📡 <b>PROPERTY RADAR · STATUS</b>`,`${icon} Stan: <b>${label}</b>${live}`,
+    `⚙️ Etap: <b>${escapeHtml(s.system?.scan_phase?.value||'—')}</b>`,
+    `🔎 Ostatni skan: ${plDate(s.last_scan?.finished_at)}`,
+    `🌐 Ostatnio źródła OK: ${s.last_scan?`${s.last_scan.healthy_sources||0}/${s.last_scan.total_sources||0}`:'—'}`,
+    `⏰ Następny: <b>${s.next_scan}</b>`].join('\n');
 }
 
 function statusLongText(s) {
-  const bad=(s.diagnostics||[]).filter(x=>!x.healthy);const good=(s.diagnostics||[]).filter(x=>x.healthy);
+  const p=s.scan_progress||{}, src=Array.isArray(p.sources)?p.sources:[];
+  const liveLines=src.map(x=>{
+    const ico=x.status==='done'?(x.healthy?'✅':'⚠️'):x.status==='running'?'🔄':x.status==='cancelled'?'⏹':'▫️';
+    const tail=x.status==='done'?` • ${x.records||0} rek.${x.elapsed_s!=null?` • ${Number(x.elapsed_s).toFixed(1)} s`:''}`:'';
+    return `${ico} ${escapeHtml(x.name||'?')}${tail}`;
+  });
+  const bad=(s.diagnostics||[]).filter(x=>!x.healthy),good=(s.diagnostics||[]).filter(x=>x.healthy);
   const sourceLines=(s.diagnostics||[]).map(x=>`${x.healthy?'✅':'⚠️'} ${escapeHtml(x.source||'?')}: rekordy ${x.records??0}, linki ${x.discovered_links??0}, detail ${x.detail_pages_ok??0}${x.blocked?` • blokady ${x.blocked}`:''}${x.fatal?` • ${escapeHtml(x.fatal)}`:''}`);
-  return [`📋 <b>PEŁNY STATUS BOTA</b>`,``,`🤖 Stan skanera: <b>${escapeHtml(s.scan_state||'idle')}</b>`,`⚙️ Faza: ${escapeHtml(s.system?.scan_phase?.value||'—')}`,
-    `▶️ Start bieżącego/ostatniego: ${plDate(s.system?.scan_started_at?.value)}`,`✅ Ostatni zakończony: ${plDate(s.last_scan?.finished_at)}`,
-    `⏱ Ostatni skan: ${s.last_scan?`${Math.max(0,Math.round((new Date(s.last_scan.finished_at)-new Date(s.last_scan.started_at))/60000))} min`:'—'}`,
-    `🌐 Źródła OK: <b>${good.length}/${s.diagnostics?.length||0}</b> • błędne/niepewne: <b>${bad.length}</b>`,``,...sourceLines,
-    ``,`📦 Ostatni skan: pobrano ${s.last_scan?.downloaded_records??'—'} • przyjęto ${s.last_scan?.accepted_records??'—'} • nowe ${s.last_scan?.new_count??'—'} • istotne zmiany cen ${s.last_scan?.price_change_count??'—'}`,
+  return [`📋 <b>PEŁNY STATUS PROPERTY RADAR</b>`,``,
+    `🤖 Stan: <b>${escapeHtml(s.scan_state||'idle')}</b>`,
+    `⚙️ Faza: ${escapeHtml(s.system?.scan_phase?.value||'—')}`,
+    `▶️ Start: ${plDate(s.system?.scan_started_at?.value)}`,
+    p.total_sources?`📊 Live: <b>${p.done_sources||0}/${p.total_sources}</b> źródeł • pobrano ${p.downloaded_records||0} • przyjęto ${p.accepted_records||0}`:'',
+    ...(liveLines.length?[``,`<b>POSTĘP ŹRÓDEŁ</b>`,...liveLines]:[]),
+    ``,`✅ Ostatni zakończony: ${plDate(s.last_scan?.finished_at)}`,
+    `🌐 Źródła OK: <b>${good.length}/${s.diagnostics?.length||0}</b> • błędne/niepewne: <b>${bad.length}</b>`,
+    ...sourceLines,
+    ``,`📦 Ostatni skan: pobrano ${s.last_scan?.downloaded_records??'—'} • przyjęto ${s.last_scan?.accepted_records??'—'} • nowe ${s.last_scan?.new_count??'—'} • zmiany cen ${s.last_scan?.price_change_count??'—'}`,
     `🚫 Odrzucone ${s.last_scan?.rejected_count??'—'} • wygaszone ${s.last_scan?.deactivated_count??'—'}`,
-    ``,`⏰ Następny automatyczny: <b>${s.next_scan}</b> • ręczny skan bez limitu`,`🧯 Ostatni błąd: ${escapeHtml(s.system?.last_error?.value||'brak')}`].join('\n');
+    ``,`⏰ Następny automatyczny: <b>${s.next_scan}</b>`,`🧯 Ostatni błąd: ${escapeHtml(s.system?.last_error?.value||'brak')}`].filter(Boolean).join('\n');
 }
 
 function databaseStatusText(s) {
@@ -427,6 +450,12 @@ async function dispatchScan(env) {
 
   // GitHub historically returned 204. Newer API versions can return 200.
   if (r.ok) {
+    try {
+      await env.DB.batch([
+        env.DB.prepare(`INSERT INTO system_state(key,value,updated_at) VALUES('scan_status','queued',datetime('now')) ON CONFLICT(key) DO UPDATE SET value='queued',updated_at=datetime('now')`),
+        env.DB.prepare(`INSERT INTO system_state(key,value,updated_at) VALUES('scan_phase','oczekiwanie na GitHub Actions',datetime('now')) ON CONFLICT(key) DO UPDATE SET value='oczekiwanie na GitHub Actions',updated_at=datetime('now')`)
+      ]);
+    } catch(e) { console.warn('scan queue state',e?.message||e); }
     return {
       ok: true,
       status: r.status,
@@ -443,6 +472,57 @@ async function dispatchScan(env) {
     http_status: r.status,
     message: `GitHub API ${r.status}: ${detail.slice(0, 350)}`
   };
+}
+
+
+async function githubRequest(env, path, options={}) {
+  const repo=String(env.GITHUB_REPO||'').trim();
+  if(!env.GITHUB_DISPATCH_TOKEN||!repo||repo.includes('PUT_')) throw new Error('GitHub Actions nie jest skonfigurowane.');
+  return await fetchWithTimeout(`https://api.github.com/repos/${repo}${path}`,{
+    ...options,
+    headers:{
+      'authorization':`Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
+      'accept':'application/vnd.github+json',
+      'x-github-api-version':'2022-11-28',
+      'user-agent':'property-radar-worker',
+      ...(options.headers||{})
+    }
+  },12000);
+}
+
+async function resolveActiveScanRun(env) {
+  const st=await systemState(env);
+  const saved=Number(st.scan_github_run_id?.value||0);
+  if(Number.isFinite(saved)&&saved>0){
+    try{
+      const sr=await githubRequest(env,`/actions/runs/${saved}`);
+      if(sr.ok){const sd=await sr.json();if(['queued','in_progress','waiting','requested','pending'].includes(sd.status))return saved;}
+    }catch{}
+  }
+  const r=await githubRequest(env,'/actions/workflows/scan.yml/runs?per_page=20');
+  if(!r.ok) throw new Error(`GitHub API ${r.status}`);
+  const d=await r.json();
+  const run=(d.workflow_runs||[]).find(x=>['queued','in_progress','waiting','requested','pending'].includes(x.status)&&x.event==='workflow_dispatch')
+    ||(d.workflow_runs||[]).find(x=>['queued','in_progress','waiting','requested','pending'].includes(x.status));
+  return run?.id||null;
+}
+
+async function stopScan(env) {
+  const runId=await resolveActiveScanRun(env);
+  if(!runId) return {ok:false,http_status:409,message:'Nie znalazłem aktywnego skanu do zatrzymania.'};
+  await env.DB.prepare(`INSERT INTO system_state(key,value,updated_at) VALUES('scan_status','cancelling',datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value='cancelling',updated_at=datetime('now')`).run();
+  const r=await githubRequest(env,`/actions/runs/${runId}/cancel`,{method:'POST'});
+  const raw=await r.text();
+  if(!r.ok){
+    return {ok:false,http_status:r.status,message:`GitHub nie anulował run ${runId}: ${raw.slice(0,260)}`};
+  }
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO system_state(key,value,updated_at) VALUES('scan_status','cancelled',datetime('now')) ON CONFLICT(key) DO UPDATE SET value='cancelled',updated_at=datetime('now')`),
+    env.DB.prepare(`INSERT INTO system_state(key,value,updated_at) VALUES('scan_phase','zatrzymany ręcznie',datetime('now')) ON CONFLICT(key) DO UPDATE SET value='zatrzymany ręcznie',updated_at=datetime('now')`),
+    env.DB.prepare(`INSERT INTO system_state(key,value,updated_at) VALUES('scan_github_run_id','',datetime('now')) ON CONFLICT(key) DO UPDATE SET value='',updated_at=datetime('now')`)
+  ]);
+  return {ok:true,run_id:runId,message:'Skan został zatrzymany.'};
 }
 
 async function handleTelegramUpdate(update, env, origin) {
@@ -494,6 +574,14 @@ Skan automatyczny: <b>09:00 / 20:00</b>.`,mainMenu(origin,role));
       await send(d.ok?'✅ <b>Skan zlecony.</b> Nie ma limitu ręcznych uruchomień.':`⚠️ ${escapeHtml(d.message)}`,mainMenu(origin,role));
       return new Response('ok');
     }
+    if(data==='scan:stop'){
+      if(role!=='admin') return await done(send('⛔ Zatrzymanie skanu tylko dla administratora.'));
+      await ack;
+      await send('⏹ <b>Zatrzymuję aktywny skan…</b>');
+      const d=await stopScan(env);
+      await send(d.ok?`✅ <b>Skan zatrzymany.</b> Run: <code>${d.run_id}</code>`:`⚠️ ${escapeHtml(d.message)}`,mainMenu(origin,role));
+      return new Response('ok');
+    }
     if(data==='diag'){
       if(role!=='admin'){await send('⛔ Diagnostyka tylko dla administratora.');return new Response('ok');}
       let db='OK';try{await env.DB.prepare('SELECT 1').first();}catch(e){db='BŁĄD: '+String(e?.message||e)}
@@ -525,6 +613,7 @@ user_id: <code>${escapeHtml(userId)}</code>`);
   else if(text==='/status') await send(statusShortText(await botStatus(env)),{inline_keyboard:[[{text:'📋 Pełny status',callback_data:'status:long'}],[{text:'⬅️ Menu',callback_data:'menu'}]]});
   else if(text==='/baza') await send(databaseStatusText(await databaseStats(env)));
   else if(text==='/skanuj'&&role==='admin'){await send('🔄 <b>Zlecam skan…</b>');const d=await dispatchScan(env);await send(d.ok?'✅ Skan zlecony. Brak limitu ręcznych uruchomień.':`⚠️ ${escapeHtml(d.message)}`);}
+  else if((text==='/stopscan'||text==='/stop')&&role==='admin'){await send('⏹ <b>Zatrzymuję skan…</b>');const d=await stopScan(env);await send(d.ok?`✅ Skan zatrzymany. Run: <code>${d.run_id}</code>`:`⚠️ ${escapeHtml(d.message)}`);}
   else await send(`🏡 <b>PROPERTY RADAR</b>
 Alerty tylko dla faktycznie nowych publikacji i istotnych zmian ceny.
 Skan automatyczny: <b>09:00 / 20:00</b>.`,mainMenu(origin,role));
@@ -557,6 +646,7 @@ async function handleApi(req, env, url) {
   if (url.pathname === '/api/me') return json({ ok: true, user });
 
   if (url.pathname === '/api/stats') return json(await databaseStats(env));
+  if (url.pathname === '/api/status') return json(await botStatus(env));
 
   if (url.pathname === '/api/listings') {
     // Mini App is plots-only. Legacy houses/garages can remain in D1 for audit/history,
@@ -579,8 +669,15 @@ async function handleApi(req, env, url) {
 
   if (url.pathname === '/api/scan' && req.method === 'POST') {
     if (user.role !== 'admin' && user.uid !== 'web') return json({ error: 'admin required' }, 403);
+    const current=await botStatus(env);
+    if(['running','queued','cancelling'].includes(String(current.scan_state||''))) return json({error:'Skan już jest aktywny.',state:current.scan_state},409);
     const d = await dispatchScan(env);
     return json(d, d.ok ? 200 : (d.http_status >= 400 && d.http_status <= 599 ? d.http_status : 502));
+  }
+  if (url.pathname === '/api/scan/stop' && req.method === 'POST') {
+    if (user.role !== 'admin' && user.uid !== 'web') return json({ error: 'admin required' }, 403);
+    const d=await stopScan(env);
+    return json(d,d.ok?200:(d.http_status||502));
   }
 
   return json({ error: 'not found' }, 404);

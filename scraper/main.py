@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio,json,os,sys
+import asyncio,copy,json,os,sys,time,traceback
 from datetime import datetime,timezone,timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -18,7 +18,7 @@ from app.rcn import RCNClient, RCN_PARSER_VERSION
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
-LISTING_PARSER_VERSION='1.3.3-olx-public-api-v1'
+LISTING_PARSER_VERSION='1.4.0-live-scan-v1'
 
 def need(name):
     v=os.getenv(name,'').strip()
@@ -75,9 +75,84 @@ async def run():
 
     tg=TelegramNotify(os.getenv('TELEGRAM_BOT_TOKEN'),os.getenv('TELEGRAM_CHAT_IDS') or os.getenv('TELEGRAM_CHAT_ID'),os.getenv('PANEL_URL',''))
     scraper=Scraper(cfg); geocoder=Geocoder(db,cfg['center'])
-    all_recs=[]; errs=[]; diagnostics=[]; healthy_sources=[]
+    all_recs=[]; accepted=[]; rejected=[]; changes=[]; errs=[]; diagnostics=[]; healthy_sources=[]
+    area_cfg=cfg['area']
+    enabled=[x for x in cfg['sources'] if x.get('enabled',True)]
 
-    db.set_state('scan_phase','Chromium + portale')
+    # Live state consumed by Mini App + Telegram. The scan still runs on GitHub Actions,
+    # but the UI receives source-level progress from D1 every few seconds.
+    progress={
+        'version':1,
+        'run_id':os.getenv('GITHUB_RUN_ID') or None,
+        'run_url':os.getenv('GITHUB_RUN_URL') or None,
+        'trigger':os.getenv('GITHUB_EVENT_NAME') or 'unknown',
+        'started_at':started,
+        'total_sources':len(enabled),
+        'done_sources':0,
+        'downloaded_records':0,
+        'accepted_records':0,
+        'rejected_records':0,
+        'sources':[{'name':x['name'],'status':'queued','records':0,'accepted':0,'healthy':None} for x in enabled]
+    }
+    if progress['run_id']: db.set_state('scan_github_run_id',str(progress['run_id']))
+    db.set_state('scan_trigger',str(progress['trigger']))
+    db.set_state('scan_progress',progress)
+    try: tg.start_progress(progress)
+    except Exception as e: errs.append('Telegram live start: '+str(e))
+
+    def progress_source(name):
+        return next((x for x in progress['sources'] if x['name']==name),None)
+
+    async def live_state_write(values,label='LIVE state'):
+        # Telemetry must never freeze/cancel Playwright. It is best-effort and uses
+        # a shorter retry policy than critical listing writes.
+        try:
+            await asyncio.to_thread(db.set_states,values,2,(5,12))
+            return True
+        except Exception as e:
+            msg=f'{label}: {type(e).__name__}: {e}'
+            errs.append(msg); print(f'[D1] warning: {msg}',flush=True)
+            return False
+
+    async def publish_progress(phase=None):
+        values={'scan_progress':copy.deepcopy(progress)}
+        if phase:values['scan_phase']=phase
+        await live_state_write(values,'LIVE progress')
+
+    def normalize_batch(records):
+        batch_ok=[]; batch_rejected=[]
+        for rec0 in records:
+            r=dict(rec0)
+            jsonld=r.pop('_jsonld',[]); body=r.pop('_body','')
+            fold=body.lower().replace('ł','l')
+            if 'gmina siepraw' in fold or 'powiat myslenicki' in fold:
+                batch_rejected.append({'url':r.get('canonical_url'),'reason':'wrong Zakliczyn (Siepraw/Myślenice)'}); continue
+            coords=geocoder.from_jsonld(jsonld)
+            if not coords and r.get('location'):
+                loc=r['location'].strip(); query=(loc+', gmina Zakliczyn, powiat tarnowski') if loc.lower()=='zakliczyn' else (loc+', powiat tarnowski')
+                coords=geocoder.geocode(query)
+            if coords:
+                r['lat'],r['lon']=coords; r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],coords[0],coords[1])
+            else:r['lat']=r['lon']=r['distance_km']=None
+            ok,locality,confidence=area_accepts(r,area_cfg,r.get('distance_km'))
+            if not ok:
+                batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':r.get('distance_km'),'reason':confidence}); continue
+            r['area_locality']=locality or r.get('location') or None; r['area_confidence']=confidence
+            if locality and (not coords or (r.get('location') or '').strip().lower() in {'zakliczyn','gmina zakliczyn'}):
+                c2=geocoder.geocode(locality+', gmina Zakliczyn, powiat tarnowski')
+                if c2:r['lat'],r['lon']=c2;r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],c2[0],c2[1])
+            r['published_at']=normalize_published(r.get('published_text'))
+            r['updated_at']=normalize_published(r.get('updated_text'))
+            r['fingerprint']=fingerprint(r.get('title',''),r.get('area_locality') or r.get('location',''),r.get('area_m2'),r.get('price'),r.get('parcel_number'))
+            r['privacy_score']=None;r['privacy_reasons']=''
+            r['deal_label']='liczę po skanie';r['median_comparable']=None;r['market_mean_comparable']=None;r['comparable_count']=0;r['comparison_quality']=''
+            for k in ['rcn_median_ppm','rcn_mean_ppm','rcn_radius_km','rcn_last_date','rcn_last_ppm']:r[k]=None
+            r['rcn_count']=0;r['rcn_months']=int(cfg.get('rcn',{}).get('months',24));r['rcn_quality']='brak danych'
+            batch_ok.append(r)
+        # A source can occasionally expose the same canonical URL more than once.
+        return list({r['canonical_url']:r for r in batch_ok}.values()),batch_rejected
+
+    db.set_state('scan_phase','uruchamianie Chromium')
     print('[BOOT] starting Playwright...', flush=True)
     async with async_playwright() as p:
         print('[BOOT] launching Chromium...', flush=True)
@@ -86,58 +161,85 @@ async def run():
             db.set_state('scan_status','error');db.set_state('last_error',f'Chromium: {type(e).__name__}: {e}'); raise
         print('[BOOT] Chromium OK', flush=True)
         sem=asyncio.Semaphore(max(1,int(cfg['browser'].get('parallel_sources',3))))
+        state_lock=asyncio.Lock()
+
+        async def mark_source(name,**fields):
+            async with state_lock:
+                item=progress_source(name)
+                if item:item.update(fields)
+                running=[x['name'] for x in progress['sources'] if x.get('status')=='running']
+                phase='portale: '+(', '.join(running[:3]) if running else f"{progress['done_sources']}/{progress['total_sources']}")
+                snapshot=copy.deepcopy(progress)
+            # requests is blocking, so run it off the asyncio/Playwright event loop.
+            await live_state_write({'scan_progress':snapshot,'scan_phase':phase},f"LIVE start {name}")
+
         async def scan_one(source):
             async with sem:
+                t0=time.monotonic()
+                await mark_source(source['name'],status='running',started_at=datetime.now(timezone.utc).isoformat())
                 print(f"[SCAN] {source['name']}...", flush=True)
                 try:
                     source_timeout=float(source.get('source_timeout_s',cfg['browser'].get('source_timeout_s',300)))
                     recs,source_errors,diag=await asyncio.wait_for(scraper.collect_source(browser,source), timeout=source_timeout)
-                    return source,recs,source_errors,diag
                 except asyncio.TimeoutError:
-                    return source,[],[f"{source['name']}: timeout całego źródła"],{'source':source['name'],'healthy':False,'fatal':'source timeout'}
+                    recs=[];source_errors=[f"{source['name']}: timeout całego źródła"];diag={'source':source['name'],'healthy':False,'fatal':'source timeout'}
                 except Exception as e:
-                    return source,[],[f"{source['name']}: {type(e).__name__}: {e}"],{'source':source['name'],'healthy':False,'fatal':f'{type(e).__name__}: {e}'}
-        enabled=[x for x in cfg['sources'] if x.get('enabled',True)]
-        results=await asyncio.gather(*(scan_one(x) for x in enabled))
-        for source,recs,source_errors,diag in results:
-            diagnostics.append(diag); all_recs.extend(recs); errs.extend(source_errors)
-            if diag.get('healthy'): healthy_sources.append(source['name'])
-            print(f"       {source['name']}: {len(recs)} rekordów | linki {diag.get('discovered_links',0)} | detail {diag.get('detail_pages_ok',0)} | {'OK' if diag.get('healthy') else 'NIEPEWNY'}", flush=True)
-        await browser.close()
+                    recs=[];source_errors=[f"{source['name']}: {type(e).__name__}: {e}"];diag={'source':source['name'],'healthy':False,'fatal':f'{type(e).__name__}: {e}'}
+                return source,recs,source_errors,diag,time.monotonic()-t0
 
-    db.set_state('scan_phase','normalizacja + lokalizacja')
-    accepted=[]; rejected=[]; area_cfg=cfg['area']
-    for r in all_recs:
-        jsonld=r.pop('_jsonld',[]); body=r.pop('_body','')
-        fold=body.lower().replace('ł','l')
-        if 'gmina siepraw' in fold or 'powiat myslenicki' in fold:
-            rejected.append({'url':r.get('canonical_url'),'reason':'wrong Zakliczyn (Siepraw/Myślenice)'}); continue
-        coords=geocoder.from_jsonld(jsonld)
-        if not coords and r.get('location'):
-            loc=r['location'].strip(); query=(loc+', gmina Zakliczyn, powiat tarnowski') if loc.lower()=='zakliczyn' else (loc+', powiat tarnowski')
-            coords=geocoder.geocode(query)
-        if coords:
-            r['lat'],r['lon']=coords; r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],coords[0],coords[1])
-        else:r['lat']=r['lon']=r['distance_km']=None
-        ok,locality,confidence=area_accepts(r,area_cfg,r.get('distance_km'))
-        if not ok:
-            rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':r.get('distance_km'),'reason':confidence}); continue
-        r['area_locality']=locality or r.get('location') or None; r['area_confidence']=confidence
-        if locality and (not coords or (r.get('location') or '').strip().lower() in {'zakliczyn','gmina zakliczyn'}):
-            c2=geocoder.geocode(locality+', gmina Zakliczyn, powiat tarnowski')
-            if c2:r['lat'],r['lon']=c2;r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],c2[0],c2[1])
-        r['published_at']=normalize_published(r.get('published_text'))
-        r['updated_at']=normalize_published(r.get('updated_text'))
-        r['fingerprint']=fingerprint(r.get('title',''),r.get('area_locality') or r.get('location',''),r.get('area_m2'),r.get('price'),r.get('parcel_number'))
-        # Text-only privacy scoring was misleading. It stays disabled until parcel/building geometry is available.
-        r['privacy_score']=None;r['privacy_reasons']=''
-        r['deal_label']='liczę po skanie';r['median_comparable']=None;r['market_mean_comparable']=None;r['comparable_count']=0;r['comparison_quality']=''
-        for k in ['rcn_median_ppm','rcn_mean_ppm','rcn_radius_km','rcn_last_date','rcn_last_ppm']:r[k]=None
-        r['rcn_count']=0;r['rcn_months']=int(cfg.get('rcn',{}).get('months',24));r['rcn_quality']='brak danych'
-        accepted.append(r)
+        tasks=[asyncio.create_task(scan_one(x),name=f"source:{x['name']}") for x in enabled]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                source,recs,source_errors,diag,elapsed=await fut
+                all_recs.extend(recs); errs.extend(source_errors)
 
+                # LIVE DATA: geocoding and D1 both use blocking requests. Run the whole
+                # normalization/write path in worker threads so other portals keep moving.
+                batch_ok,batch_rejected=await asyncio.to_thread(normalize_batch,recs)
+                rejected.extend(batch_rejected)
+                persisted=batch_ok
+                if batch_ok:
+                    try:
+                        portal_changes=await asyncio.to_thread(db.upsert_many,batch_ok)
+                        changes.extend(portal_changes); accepted.extend(batch_ok)
+                    except Exception as e:
+                        persisted=[]
+                        msg=f"{source['name']}: D1 persist {type(e).__name__}: {e}"
+                        errs.append(msg); diag['persistence_error']=msg; diag['healthy']=False
+                        print(f'[D1] warning: {msg}; skan pozostałych źródeł trwa dalej',flush=True)
+                if diag.get('healthy'): healthy_sources.append(source['name'])
+                diagnostics.append(diag)
+
+                async with state_lock:
+                    item=progress_source(source['name'])
+                    if item:item.update({
+                        'status':'done','finished_at':datetime.now(timezone.utc).isoformat(),
+                        'records':len(recs),'accepted':len(persisted),'healthy':bool(diag.get('healthy')),
+                        'elapsed_s':round(elapsed,1),'error':diag.get('fatal') or diag.get('persistence_error')
+                    })
+                    progress['done_sources']+=1
+                    progress['downloaded_records']=len(all_recs)
+                    progress['accepted_records']=len(accepted)
+                    progress['rejected_records']=len(rejected)
+                    snapshot=copy.deepcopy(progress)
+                    phase=f"portale {progress['done_sources']}/{progress['total_sources']} • {source['name']}"
+                await live_state_write({'scan_progress':snapshot,'scan_phase':phase},f"LIVE done {source['name']}")
+                try: await asyncio.to_thread(tg.update_progress,snapshot)
+                except Exception as e: errs.append('Telegram live update: '+str(e))
+                print(f"       {source['name']}: {len(recs)} rekordów | przyjęto {len(persisted)} | linki {diag.get('discovered_links',0)} | detail {diag.get('detail_pages_ok',0)} | {'OK' if diag.get('healthy') else 'NIEPEWNY'}", flush=True)
+        finally:
+            # If anything outside a portal fails, do not close Chromium under still-running
+            # Playwright tasks. Cancel and retrieve them first to avoid TargetClosedError noise.
+            pending=[t for t in tasks if not t.done()]
+            for t in pending:t.cancel()
+            if pending:await asyncio.gather(*pending,return_exceptions=True)
+            try:await browser.close()
+            except Exception:pass
+
+    # All portal records are already in D1. From here we only finalize expiry,
+    # RCN and market scoring.
     accepted=list({r['canonical_url']:r for r in accepted}.values())
-    changes=db.upsert_many(accepted)
+    db.set_state('scan_phase','finalizacja ofert')
     threshold=int(cfg.get('retention',{}).get('missing_scans_before_inactive',3)); deactivated=db.age_missing_for_healthy_sources(healthy_sources,threshold)
 
     # Real transaction prices from GUGiK RCN WFS; failures never block listing alerts.
@@ -238,6 +340,12 @@ async def run():
     finished=datetime.now(timezone.utc).isoformat(); status='ok' if healthy_count>=max(1,len(diagnostics)//2) else 'warning'
     db.record_scan(started_at=started,finished_at=finished,downloaded_records=len(all_recs),accepted_records=len(accepted),active_after_scan=len(unique),new_count=fresh_new,price_change_count=meaningful_changes,rejected_count=len(rejected),deactivated_count=deactivated,healthy_sources=healthy_count,total_sources=len(diagnostics),diagnostics_json=json.dumps(diagnostics,ensure_ascii=False),status=status)
     db.set_state('listing_parser_version',LISTING_PARSER_VERSION)
+    progress['finished_at']=finished;progress['status']='done';progress['done_sources']=progress['total_sources']
+    progress['downloaded_records']=len(all_recs);progress['accepted_records']=len(accepted);progress['rejected_records']=len(rejected)
+    db.set_state('scan_progress',progress)
+    try: tg.update_progress(progress,final=True)
+    except Exception as e: errs.append('Telegram live final: '+str(e))
+    db.set_state('scan_github_run_id','')
     db.set_state('scan_status','idle');db.set_state('scan_phase','gotowe');db.set_state('last_scan_finished_at',finished);db.set_state('last_error','\n'.join(errs[-8:]) if errs else '')
     (LOGS/'scan_diagnostics.json').write_text(json.dumps({'downloaded':len(all_recs),'accepted':len(accepted),'active':len(unique),'fresh_new':fresh_new,'meaningful_price_changes':meaningful_changes,'rcn_transactions':len(rcn_rows),'sources':diagnostics},ensure_ascii=False,indent=2),encoding='utf-8')
     (LOGS/'rejected_area.json').write_text(json.dumps(rejected,ensure_ascii=False,indent=2),encoding='utf-8')
@@ -246,5 +354,18 @@ async def run():
     db.close()
 
 if __name__=='__main__':
-    try:asyncio.run(run())
-    except KeyboardInterrupt:sys.exit(130)
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:
+        # Always leave an artifact for GitHub Actions, even when failure happens before
+        # normal scan_diagnostics.json is produced.
+        try:
+            LOGS.mkdir(exist_ok=True)
+            text=f"{datetime.now(timezone.utc).isoformat()} | {type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+            (LOGS/'fatal_error.txt').write_text(text,encoding='utf-8')
+        except Exception:
+            pass
+        print(f'[FATAL] {type(e).__name__}: {e}',flush=True)
+        raise

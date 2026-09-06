@@ -331,7 +331,15 @@ class Scraper:
                         errors.append(f"{x}: Otodom detail {type(e).__name__}: {e}")
                 batch.append(asyncio.create_task(bounded()))
             remaining=max(1.0,detail_budget-(asyncio.get_running_loop().time()-started))
-            done,pending=await asyncio.wait(batch,timeout=remaining)
+            try:
+                done,pending=await asyncio.wait(batch,timeout=remaining)
+            except asyncio.CancelledError:
+                # Source-level timeout/cancel: retrieve every child task before its page/context
+                # is closed, otherwise Playwright reports "Future exception was never retrieved".
+                for t in batch:
+                    if not t.done():t.cancel()
+                await asyncio.gather(*batch,return_exceptions=True)
+                raise
             if pending:
                 timeout_count += len(pending)
                 for t in pending:t.cancel()
@@ -701,7 +709,13 @@ class Scraper:
                     except asyncio.TimeoutError: errors.append(f'{x}: OLX HTTP fallback detail timeout after {detail_timeout:.0f}s')
                     except Exception as e: errors.append(f'{x}: OLX HTTP fallback detail {type(e).__name__}: {e}')
                 tasks.append(asyncio.create_task(bounded()))
-            await asyncio.gather(*tasks,return_exceptions=True)
+            try:
+                await asyncio.gather(*tasks,return_exceptions=True)
+            except asyncio.CancelledError:
+                for t in tasks:
+                    if not t.done():t.cancel()
+                await asyncio.gather(*tasks,return_exceptions=True)
+                raise
 
         # De-dupe because an offer may appear in both API query and nearby HTML supplement.
         unique={}
@@ -1085,7 +1099,15 @@ class Scraper:
                 batch_links=links[i:i+detail_parallel]
                 batch=[asyncio.create_task(bounded_detail(u)) for u in batch_links]
                 remaining=max(1.0,detail_budget_s-elapsed)
-                done,pending=await asyncio.wait(batch,timeout=remaining)
+                try:
+                    done,pending=await asyncio.wait(batch,timeout=remaining)
+                except asyncio.CancelledError:
+                    # ``collect_source`` is itself wrapped in a source timeout. Make child
+                    # cancellation orderly before the browser context is closed.
+                    for t in batch:
+                        if not t.done():t.cancel()
+                    await asyncio.gather(*batch,return_exceptions=True)
+                    raise
                 if pending:
                     timed_out_details += len(pending)
                     for t in pending: t.cancel()

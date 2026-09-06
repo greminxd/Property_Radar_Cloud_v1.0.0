@@ -8,6 +8,7 @@ class TelegramNotify:
         self.chat_ids=[x.strip() for x in raw.replace(';',',').split(',') if x.strip()]
         self.panel_url=(panel_url or '').rstrip('/')
         self.s=requests.Session()
+        self.progress_messages={}
     def ready(self): return bool(self.token and self.chat_ids)
 
     def _buttons(self,listing_url=None):
@@ -15,6 +16,62 @@ class TelegramNotify:
         if listing_url: row.append({'text':'🔗 Ogłoszenie','url':listing_url})
         if self.panel_url: row.append({'text':'🏡 Mini App','web_app':{'url':self.panel_url}})
         return {'inline_keyboard':[row]} if row else None
+
+    def _progress_markup(self):
+        rows=[]
+        if self.panel_url: rows.append([{'text':'🏡 Mini App','web_app':{'url':self.panel_url}},{'text':'📡 Status','callback_data':'status:short'}])
+        rows.append([{'text':'⏹ Zatrzymaj skan','callback_data':'scan:stop'}])
+        return {'inline_keyboard':rows}
+
+    @staticmethod
+    def _progress_text(progress, final=False):
+        total=max(0,int(progress.get('total_sources') or 0)); done=max(0,int(progress.get('done_sources') or 0))
+        pct=round(done/total*100) if total else (100 if final else 0)
+        blocks=10; filled=min(blocks,round(pct/100*blocks))
+        bar='█'*filled+'░'*(blocks-filled)
+        src=[]
+        for x in progress.get('sources') or []:
+            st=x.get('status')
+            ico='✅' if st=='done' and x.get('healthy') else '⚠️' if st=='done' else '🔄' if st=='running' else '▫️'
+            tail=f" · {x.get('records',0)}" if st=='done' else ''
+            src.append(f"{ico} {esc(x.get('name') or '?')}{tail}")
+        title='✅ <b>SKAN ZAKOŃCZONY</b>' if final else '📡 <b>SKAN PROPERTY RADAR · LIVE</b>'
+        lines=[title,f"<code>{bar}</code> <b>{pct}%</b>",f"🌐 Źródła: <b>{done}/{total}</b>  •  📥 pobrano: <b>{progress.get('downloaded_records',0)}</b>  •  ✅ przyjęto: <b>{progress.get('accepted_records',0)}</b>"]
+        if src: lines+=['',*src]
+        lines+=['', 'Dane z ukończonych źródeł są już widoczne w Mini App.' if not final else 'Mini App zawiera wynik zakończonego skanu.']
+        return '\n'.join(lines)
+
+    def start_progress(self,progress):
+        if not self.ready(): return
+        text=self._progress_text(progress,False); markup=self._progress_markup()
+        for chat_id in self.chat_ids:
+            try:
+                r=self.s.post(f'https://api.telegram.org/bot{self.token}/sendMessage',json={
+                    'chat_id':chat_id,'text':text,'parse_mode':'HTML','disable_web_page_preview':True,'reply_markup':markup
+                },timeout=25)
+                if r.ok:
+                    data=r.json()
+                    mid=(data.get('result') or {}).get('message_id')
+                    if mid:self.progress_messages[str(chat_id)]=mid
+            except Exception:
+                pass
+
+    def update_progress(self,progress,final=False):
+        if not self.ready(): return
+        text=self._progress_text(progress,final); markup=self._progress_markup()
+        for chat_id in self.chat_ids:
+            mid=self.progress_messages.get(str(chat_id))
+            if not mid: continue
+            try:
+                r=self.s.post(f'https://api.telegram.org/bot{self.token}/editMessageText',json={
+                    'chat_id':chat_id,'message_id':mid,'text':text,'parse_mode':'HTML',
+                    'disable_web_page_preview':True,'reply_markup':markup
+                },timeout=25)
+                # "message is not modified" is harmless.
+                if not r.ok and 'message is not modified' not in r.text.lower():
+                    pass
+            except Exception:
+                pass
 
     def send(self,text,listing_url=None,image_url=None):
         if not self.ready(): return False

@@ -1,5 +1,8 @@
 from __future__ import annotations
 import json
+import random
+import threading
+import time
 from datetime import datetime, timezone
 import requests
 
@@ -16,19 +19,71 @@ LISTING_COLUMNS = [
 class CloudDB:
     def __init__(self, account_id:str, database_id:str, api_token:str):
         self.url=f'https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database/{database_id}/query'
-        self.session=requests.Session()
-        self.session.headers.update({'Authorization':f'Bearer {api_token}','Content-Type':'application/json'})
+        self._headers={'Authorization':f'Bearer {api_token}','Content-Type':'application/json'}
+        self._session_lock=threading.RLock()
+        self.session=self._new_session()
         self.scan_started=None
+
+    def _new_session(self):
+        s=requests.Session(); s.headers.update(self._headers); return s
 
     def now(self): return datetime.now(timezone.utc).isoformat()
     def begin_scan(self): self.scan_started=self.now()
 
-    def _post(self,payload):
-        r=self.session.post(self.url,json=payload,timeout=25)
-        r.raise_for_status(); data=r.json()
-        if not data.get('success',False):
-            raise RuntimeError(json.dumps(data.get('errors') or data,ensure_ascii=False)[:1200])
-        return data
+    @staticmethod
+    def _retry_delay(attempt,response=None):
+        if response is not None:
+            try:
+                raw=response.headers.get('Retry-After')
+                if raw is not None:return min(15.0,max(0.5,float(raw)))
+            except Exception:pass
+        base=(1.0,2.5,5.5,9.0)[min(max(0,attempt-1),3)]
+        return base + random.uniform(0.0,0.35)
+
+    def _post(self,payload,attempts=4,timeout=None):
+        """Call Cloudflare D1 with bounded retries for transient transport/API failures.
+
+        The LIVE scanner writes status frequently. A single Cloudflare read timeout must
+        not destroy an otherwise healthy scan. Requests are serialized because v1.4
+        moves D1 work to worker threads and requests.Session is not shared concurrently.
+        """
+        attempts=max(1,int(attempts or 1)); timeout=timeout or (8,35)
+        transient_status={408,425,429,500,502,503,504,520,521,522,523,524}
+        last_error=None
+        for attempt in range(1,attempts+1):
+            response=None
+            try:
+                with self._session_lock:
+                    response=self.session.post(self.url,json=payload,timeout=timeout)
+                if response.status_code in transient_status:
+                    if attempt>=attempts:
+                        response.raise_for_status()
+                    delay=self._retry_delay(attempt,response)
+                    print(f'[D1] transient HTTP {response.status_code}; retry {attempt}/{attempts} in {delay:.1f}s',flush=True)
+                    time.sleep(delay); continue
+                response.raise_for_status(); data=response.json()
+                if not data.get('success',False):
+                    raise RuntimeError(json.dumps(data.get('errors') or data,ensure_ascii=False)[:1200])
+                return data
+            except (requests.Timeout,requests.ConnectionError) as e:
+                last_error=e
+                with self._session_lock:
+                    try:self.session.close()
+                    except Exception:pass
+                    self.session=self._new_session()
+                if attempt>=attempts:raise
+                delay=self._retry_delay(attempt,response)
+                print(f'[D1] {type(e).__name__}; retry {attempt}/{attempts} in {delay:.1f}s',flush=True)
+                time.sleep(delay)
+            except requests.HTTPError as e:
+                last_error=e
+                status=getattr(getattr(e,'response',None),'status_code',None)
+                if status not in transient_status or attempt>=attempts:raise
+                delay=self._retry_delay(attempt,getattr(e,'response',None))
+                print(f'[D1] HTTP {status}; retry {attempt}/{attempts} in {delay:.1f}s',flush=True)
+                time.sleep(delay)
+        if last_error:raise last_error
+        raise RuntimeError('D1 request failed without a response')
 
     @staticmethod
     def _result_items(data):
@@ -41,12 +96,12 @@ class CloudDB:
         if not items: return []
         return items[0].get('results') or []
 
-    def execute(self,sql,params=None): self._post({'sql':sql,'params':params or []})
+    def execute(self,sql,params=None,attempts=4,timeout=None): self._post({'sql':sql,'params':params or []},attempts=attempts,timeout=timeout)
 
-    def batch(self,statements,chunk=28):
+    def batch(self,statements,chunk=28,attempts=4,timeout=None):
         stmts=[{'sql':s,'params':p} for s,p in statements]
         for i in range(0,len(stmts),chunk):
-            if stmts[i:i+chunk]: self._post({'batch':stmts[i:i+chunk]})
+            if stmts[i:i+chunk]: self._post({'batch':stmts[i:i+chunk]},attempts=attempts,timeout=timeout)
 
     def count(self):
         rows=self.query('SELECT COUNT(*) c FROM listings')
@@ -68,10 +123,17 @@ class CloudDB:
         rows=self.query('SELECT COUNT(*) c FROM scan_runs WHERE finished_at>=? AND finished_at<?',[start_iso,end_iso])
         return int(rows[0]['c']) if rows else 0
 
-    def set_state(self,key,value):
-        now=self.now()
-        if not isinstance(value,str): value=json.dumps(value,ensure_ascii=False)
-        self.execute('INSERT INTO system_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at',[key,value,now])
+    def set_states(self,values,attempts=4,timeout=None):
+        if not values:return
+        now=self.now(); stmts=[]
+        sql='INSERT INTO system_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at'
+        for key,value in values.items():
+            if not isinstance(value,str):value=json.dumps(value,ensure_ascii=False)
+            stmts.append((sql,[key,value,now]))
+        self.batch(stmts,attempts=attempts,timeout=timeout)
+
+    def set_state(self,key,value,attempts=4,timeout=None):
+        self.set_states({key:value},attempts=attempts,timeout=timeout)
 
     def existing_map(self):
         return {r['canonical_url']:r for r in self.query('SELECT id,canonical_url,price,price_alert_reference,active,source_status,published_at FROM listings')}
@@ -96,7 +158,12 @@ class CloudDB:
             params=[rec.get(c) for c in LISTING_COLUMNS]+[new_price,first_seen,now,row_active]
             stmts.append((sql,params))
             if new_price is not None and (is_new or price_changed):
-                stmts.append(("INSERT INTO price_history(listing_id,seen_at,price) SELECT id,?,? FROM listings WHERE canonical_url=?",[now,new_price,rec['canonical_url']]))
+                # Idempotent insert: a transport timeout may happen after D1 committed
+                # the request, so a retry must not duplicate the same history point.
+                stmts.append(("""INSERT INTO price_history(listing_id,seen_at,price)
+                    SELECT l.id,?,? FROM listings l WHERE l.canonical_url=?
+                    AND NOT EXISTS (SELECT 1 FROM price_history ph WHERE ph.listing_id=l.id AND ph.seen_at=? AND ph.price=?)""",
+                    [now,new_price,rec['canonical_url'],now,new_price]))
             changes.append((rec,is_new,price_changed,old_price,reference_price))
         self.batch(stmts)
         return changes
@@ -158,6 +225,9 @@ class CloudDB:
     def record_scan(self,**kw):
         cols=['started_at','finished_at','downloaded_records','accepted_records','active_after_scan','new_count','price_change_count','rejected_count','deactivated_count','healthy_sources','total_sources','diagnostics_json','status']
         vals=[kw.get(c) for c in cols]
-        self.execute(f"INSERT INTO scan_runs({','.join(cols)}) VALUES({','.join('?' for _ in cols)})",vals)
+        # Idempotent on started_at so retry after an ambiguous network timeout cannot
+        # create a duplicate scan-run row.
+        self.execute(f"INSERT INTO scan_runs({','.join(cols)}) SELECT {','.join('?' for _ in cols)} WHERE NOT EXISTS (SELECT 1 FROM scan_runs WHERE started_at=?)",vals+[kw.get('started_at')])
 
-    def close(self): self.session.close()
+    def close(self):
+        with self._session_lock:self.session.close()

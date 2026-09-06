@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#071a1d" />
   <meta name="color-scheme" content="dark" />
   <title>Property Radar</title>
-  <link rel="stylesheet" href="/styles.css?v=1490" />
+  <link rel="stylesheet" href="/styles.css?v=1500" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -82,9 +82,9 @@
           <button id="filtersBtn" class="filter-btn">Filtry <b id="filterCount">0</b></button>
         </div>
         <div id="quickFilters" class="quick">
+          <button class="chip" data-quick="7d">🔥 Nowe 7 dni</button>
+          <button class="chip" data-quick="30d">🆕 30 dni</button>
           <button class="chip active" data-quick="all">Wszystkie</button>
-          <button class="chip" data-quick="7d">Nowe 7 dni</button>
-          <button class="chip" data-quick="30d">30 dni</button>
           <button class="chip" data-quick="drops">Spadki cen</button>
           <button class="chip" data-quick="phone">Telefon</button>
           <button class="chip" data-quick="large">1500+ m²</button>
@@ -92,7 +92,8 @@
         <div class="browser-foot">
           <span id="activePreset">• aktywne • dowolna data</span>
           <select id="sort">
-            <option value="published">Najnowsze</option>
+            <option value="freshness" selected>Priorytet 7 → 30 dni</option>
+            <option value="published">Najnowsze bez grup</option>
             <option value="updated">Ostatnio zmienione</option>
             <option value="distance">Najbliżej</option>
             <option value="priceAsc">Cena ↑</option>
@@ -139,6 +140,6 @@
     <dialog id="rejectDialog" class="confirm-dialog"><div><div class="warn-icon">!</div><h3>Usunąć tę ofertę?</h3><p>Zniknie z D1 i trafi na blacklistę. Kolejny skan nie doda jej ponownie.</p><div class="confirm-actions"><button id="rejectCancel" class="btn soft">Anuluj</button><button id="rejectConfirm" class="btn danger solid">Usuń i zablokuj</button></div></div></dialog>
     <div id="toast" class="toast"></div>
   </div>
-  <script type="module" src="/app.js?v=1490"></script>
+  <script type="module" src="/app.js?v=1500"></script>
 </body>
 </html>

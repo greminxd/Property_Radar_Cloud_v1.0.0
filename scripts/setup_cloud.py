@@ -126,7 +126,7 @@ try:
         chunk=bad[i:i+40]; qs=','.join('?' for _ in chunk)
         d1(f'DELETE FROM price_history WHERE listing_id IN ({qs})',chunk)
         d1(f'DELETE FROM listings WHERE id IN ({qs})',chunk)
-    maintenance='1.4.8-blacklist-market-only-v3'
+    maintenance='1.5.0-sale-only-cleanup-v4'
     now=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
     d1("INSERT INTO system_state(key,value,updated_at) VALUES('db_maintenance_version',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",[maintenance,now])
     d1("INSERT INTO system_state(key,value,updated_at) VALUES('db_maintenance_last',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",[json.dumps({'version':maintenance,'checked_rows':len(rows),'deleted_rows':len(bad),'reasons':reasons,'finished_at':now},ensure_ascii=False),now])

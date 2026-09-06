@@ -120,6 +120,32 @@ def _admin_guard(location: str | None,title: str | None,description: str | None)
     return None
 
 
+def _same_name_zakliczyn_guard(location: str | None, title: str | None, description: str | None) -> str | None:
+    """Reject the other Małopolskie Zakliczyn (near Myślenice/Siepraw).
+
+    Portals frequently expose only the city label ``Zakliczyn, Małopolskie``. That
+    label is ambiguous: there is also a Zakliczyn near Myślenice. We therefore
+    look for contextual phrases that disambiguate the advert without treating a
+    casual mention of Myślenice as enough evidence on its own.
+    """
+    loc=fold(location)
+    title_f=fold(title)
+    desc_f=fold((description or '')[:1800])
+    combined=' '.join([title_f,desc_f])
+    # The guard matters only when the portal/location evidence is generic Zakliczyn.
+    if 'zakliczyn' not in loc and 'zakliczyn' not in title_f:
+        return None
+    patterns=(
+        r'zakliczyn(?:ie)?\s*[/,;()\-]*\s*(?:kolo|okolice|k\.?)\s+myslenic',
+        r'(?:kolo|okolice|k\.?)\s+myslenic',
+        r'powiat\s+myslenick',
+        r'(?:gmina|gm\.)\s+siepraw',
+    )
+    if any(re.search(p,combined,re.I) for p in patterns):
+        return 'explicit-outside-same-name-zakliczyn-myslenice'
+    return None
+
+
 def detect_allowed_locality(location: str | None, title: str | None, description: str | None, area_cfg: dict) -> tuple[str | None, str]:
     """Resolve locality against one canonical registry and explicit admin evidence.
 
@@ -138,6 +164,9 @@ def detect_allowed_locality(location: str | None, title: str | None, description
     admin_reject=_admin_guard(location,title,description)
     if admin_reject:
         return None,admin_reject
+    same_name_reject=_same_name_zakliczyn_guard(location,title,description)
+    if same_name_reject:
+        return None,same_name_reject
 
     # Gather evidence from each strong field. A specific village beats generic Zakliczyn.
     loc_hits=_find_names(location or '',known)

@@ -35,7 +35,8 @@
       "min_absolute_pln": 5000,
       "min_percent": 3.0,
       "minimum_any_pln": 1000
-    }
+    },
+    "notify_price_changes": false
   },
   "scoring": {
     "minimum_comparables_for_deal_score": 3,

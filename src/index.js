@@ -206,6 +206,26 @@ function escapeHtml(v) {
   return String(v ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 }
 
+function foldPublicText(v) {
+  return String(v ?? '').toLowerCase().replace(/ł/g,'l').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+}
+
+function rejectLegacyPublicListing(r) {
+  const url=String(r?.canonical_url||'');
+  if (url === 'https://www.olx.pl/d/oferta/dzialka-budowlana-20km-od-krakowa-CID3-ID1c8sfW.html' ||
+      url === 'https://www.olx.pl/d/oferta/powierzchnia-300m2-CID3-ID1c2K6x.html') return true;
+  const title=foldPublicText(r?.title);
+  const desc=foldPublicText(r?.description).slice(0,5000);
+  const loc=foldPublicText(r?.area_locality||r?.location);
+  const rentalTitle=/\b(do wynajecia|na wynajem|wynajme|wynajem|dzierzawa|do dzierzawy)\b/.test(title);
+  const rentalDesc=/\b(oferta wynajmu|przedmiotem wynajmu|do wynajecia|na wynajem|cena wynajmu|czynsz)\b/.test(desc) ||
+    /\b(?:zl|pln)\b.{0,18}\b(?:miesiecznie|za miesiac)\b/.test(desc);
+  if (rentalTitle || rentalDesc) return true;
+  const genericZakliczyn=/\bzakliczyn\b/.test(loc) && !/\b(zdonia|slona|biesnik|konczyska|olszowa|palesnica|luslawice|wesolow)\b/.test(loc);
+  const wrongZakliczyn=/zakliczyn(?:ie)?\s*[\/,;()\-]*\s*(?:kolo|okolice|k\.?)\s+myslenic|(?:kolo|okolice|k\.?)\s+myslenic|powiat\s+myslenick|(?:gmina|gm\.)\s+siepraw/.test(`${title} ${desc}`);
+  return genericZakliczyn && wrongZakliczyn;
+}
+
 function mainMenu(origin, role = 'user') {
   const rows = [
     [{ text: '🏡 OTWÓRZ MINI APP', web_app: { url: origin } }],
@@ -284,12 +304,31 @@ function nextScanLabel() {
 }
 
 async function botStatus(env) {
-  const [db,st]=await Promise.all([databaseStats(env),systemState(env)]);const last=db.last_scan;const diags=parseDiag(last);
+  let [db,st]=await Promise.all([databaseStats(env),systemState(env)]);
+  // While a manual scan is queued/running, GitHub is the source of truth for the runner itself.
+  // Syncing it here prevents the Mini App from being stuck on "queued" forever when Actions
+  // fails before scraper/main.py has a chance to write to D1.
+  try {
+    const state=String(st.scan_status?.value||'idle');
+    if(['queued','running','cancelling'].includes(state)) {
+      const lastCheck=Date.parse(st.scan_github_checked_at?.value||'')||0;
+      if(Date.now()-lastCheck>4500) {
+        await syncGithubScanState(env,st);
+        st=await systemState(env);
+      }
+    }
+  } catch(e) { console.warn('github status sync',e?.message||e); }
+  const last=db.last_scan;const diags=parseDiag(last);
   let scanState=st.scan_status?.value||'idle';
   const started=st.scan_started_at?.value; if(scanState==='running'&&started){const age=(Date.now()-new Date(started).getTime())/60000;if(age>70)scanState='stale';}
   let progress={};
   try { progress=JSON.parse(st.scan_progress?.value||'{}')||{}; } catch {}
-  return {...db,system:st,scan_state:scanState,scan_progress:progress,diagnostics:diags,next_scan:nextScanLabel()};
+  const scanControl={
+    configured:!!(env.GITHUB_DISPATCH_TOKEN&&env.GITHUB_REPO&&!String(env.GITHUB_REPO).includes('PUT_')),
+    repo:String(env.GITHUB_REPO||''),
+    branch:String(st.scan_requested_branch?.value||env.GITHUB_BRANCH||'auto')
+  };
+  return {...db,system:st,scan_state:scanState,scan_progress:progress,diagnostics:diags,next_scan:nextScanLabel(),scan_control:scanControl};
 }
 
 function statusShortText(s) {
@@ -371,64 +410,104 @@ async function listForBot(env, mode) {
   return (await env.DB.prepare(`SELECT * FROM listings WHERE active=1 AND category='plot' AND julianday(COALESCE(published_at,first_seen))>=julianday('now','-3 day') ORDER BY COALESCE(published_at,first_seen) DESC LIMIT 6`).all()).results||[];
 }
 
+async function setSystemStates(env, values) {
+  const stmts=[];
+  const sql=`INSERT INTO system_state(key,value,updated_at) VALUES(?,?,datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=datetime('now')`;
+  for(const [key,value] of Object.entries(values||{})) {
+    stmts.push(env.DB.prepare(sql).bind(key,typeof value==='string'?value:JSON.stringify(value)));
+  }
+  if(stmts.length) await env.DB.batch(stmts);
+}
+
+async function resolveGithubBranch(env, repo) {
+  const configured=String(env.GITHUB_BRANCH||'').trim();
+  if(configured) return configured;
+  try {
+    const r=await fetchWithTimeout(`https://api.github.com/repos/${repo}`,{
+      headers:{
+        'authorization':`Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
+        'accept':'application/vnd.github+json',
+        'x-github-api-version':'2022-11-28',
+        'user-agent':'property-radar-worker'
+      }
+    },12000);
+    if(r.ok){const d=await r.json();if(d?.default_branch)return String(d.default_branch);}
+  } catch(e) { console.warn('default branch lookup',e?.message||e); }
+  // Most new repositories use main. dispatchScan additionally retries master on ref errors.
+  return 'main';
+}
+
+async function githubDispatchOnce(env,repo,branch) {
+  const r=await fetchWithTimeout(`https://api.github.com/repos/${repo}/actions/workflows/scan.yml/dispatches`, {
+    method:'POST',
+    headers:{
+      'authorization':`Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
+      'accept':'application/vnd.github+json',
+      'x-github-api-version':'2022-11-28',
+      'user-agent':'property-radar-worker',
+      'content-type':'application/json'
+    },
+    body:JSON.stringify({ref:branch})
+  },12000);
+  const raw=await r.text();let body=null;
+  if(raw){try{body=JSON.parse(raw)}catch{body=raw}}
+  return {r,body};
+}
+
 async function dispatchScan(env) {
-  const repo = String(env.GITHUB_REPO || '').trim();
-  if (!env.GITHUB_DISPATCH_TOKEN || !repo || repo.includes('PUT_')) {
+  const repo=String(env.GITHUB_REPO||'').trim();
+  if(!env.GITHUB_DISPATCH_TOKEN||!repo||repo.includes('PUT_')) {
     return {
-      ok: false,
-      code: 'github_dispatch_not_configured',
-      http_status: 503,
-      message: !env.GITHUB_DISPATCH_TOKEN
+      ok:false,code:'github_dispatch_not_configured',http_status:503,
+      message:!env.GITHUB_DISPATCH_TOKEN
         ? 'Brak GITHUB_DISPATCH_TOKEN w Cloudflare Worker → Settings → Variables & Secrets.'
         : 'Brak poprawnego GITHUB_REPO w Cloudflare Worker.'
     };
   }
 
-  const branch = String(env.GITHUB_BRANCH || 'master').trim() || 'master';
-  const r = await fetchWithTimeout(`https://api.github.com/repos/${repo}/actions/workflows/scan.yml/dispatches`, {
-    method: 'POST',
-    headers: {
-      'authorization': `Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
-      'accept': 'application/vnd.github+json',
-      'x-github-api-version': '2022-11-28',
-      'user-agent': 'property-radar-worker',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({ ref: branch }),
-  }, 12000);
+  let branch=await resolveGithubBranch(env,repo);
+  let {r,body}=await githubDispatchOnce(env,repo,branch);
 
-  const raw = await r.text();
-  let body = null;
-  if (raw) {
-    try { body = JSON.parse(raw); } catch { body = raw; }
+  // A stale hard-coded branch was the most common reason the Mini App button did nothing.
+  // If GitHub says the ref is invalid, try the other conventional branch automatically.
+  if(!r.ok && [404,422].includes(r.status)) {
+    const detail=body&&typeof body==='object'?(body.message||JSON.stringify(body)):String(body||'');
+    if(/ref|branch/i.test(detail)) {
+      const alt=branch==='main'?'master':'main';
+      const retry=await githubDispatchOnce(env,repo,alt);
+      if(retry.r.ok){branch=alt;r=retry.r;body=retry.body;}
+    }
   }
 
-  // GitHub historically returned 204. Newer API versions can return 200.
-  if (r.ok) {
+  if(r.ok) {
+    const requestedAt=new Date().toISOString();
+    const bodyRunId=body&&typeof body==='object'?body.workflow_run_id||null:null;
+    const bodyRunUrl=body&&typeof body==='object'?(body.html_url||body.run_url||''):'';
     try {
-      await env.DB.batch([
-        env.DB.prepare(`INSERT INTO system_state(key,value,updated_at) VALUES('scan_status','queued',datetime('now')) ON CONFLICT(key) DO UPDATE SET value='queued',updated_at=datetime('now')`),
-        env.DB.prepare(`INSERT INTO system_state(key,value,updated_at) VALUES('scan_phase','oczekiwanie na GitHub Actions',datetime('now')) ON CONFLICT(key) DO UPDATE SET value='oczekiwanie na GitHub Actions',updated_at=datetime('now')`)
-      ]);
+      await setSystemStates(env,{
+        scan_status:'queued',
+        scan_phase:'GitHub Actions: zlecono skan, czekam na runner',
+        scan_requested_at:requestedAt,
+        scan_requested_branch:branch,
+        scan_github_run_id:bodyRunId?String(bodyRunId):'',
+        scan_github_run_url:String(bodyRunUrl||''),
+        scan_github_status:'queued',
+        scan_github_conclusion:'',
+        scan_progress:{version:2,status:'queued',run_id:bodyRunId,run_url:bodyRunUrl||null,started_at:null,heartbeat_at:requestedAt,total_sources:0,done_sources:0,downloaded_records:0,accepted_records:0,rejected_records:0,sources:[]}
+      });
     } catch(e) { console.warn('scan queue state',e?.message||e); }
     return {
-      ok: true,
-      status: r.status,
-      workflow_run_id: body && typeof body === 'object' ? body.workflow_run_id || null : null,
-      run_url: body && typeof body === 'object' ? body.html_url || body.run_url || null : null,
-      message: 'Skan został uruchomiony na GitHub Actions.'
+      ok:true,status:r.status,branch,
+      workflow_run_id:body&&typeof body==='object'?body.workflow_run_id||null:null,
+      run_url:body&&typeof body==='object'?body.html_url||body.run_url||null:null,
+      message:`Skan został zlecony na GitHub Actions (${branch}).`
     };
   }
 
-  const detail = body && typeof body === 'object' ? (body.message || JSON.stringify(body)) : String(body || '');
-  return {
-    ok: false,
-    code: 'github_dispatch_failed',
-    http_status: r.status,
-    message: `GitHub API ${r.status}: ${detail.slice(0, 350)}`
-  };
+  const detail=body&&typeof body==='object'?(body.message||JSON.stringify(body)):String(body||'');
+  return {ok:false,code:'github_dispatch_failed',http_status:r.status,message:`GitHub API ${r.status}: ${detail.slice(0,350)}`};
 }
-
 
 async function githubRequest(env, path, options={}) {
   const repo=String(env.GITHUB_REPO||'').trim();
@@ -443,6 +522,53 @@ async function githubRequest(env, path, options={}) {
       ...(options.headers||{})
     }
   },12000);
+}
+
+
+async function syncGithubScanState(env, st=null) {
+  st=st||await systemState(env);
+  const current=String(st.scan_status?.value||'idle');
+  if(!['queued','running','cancelling'].includes(current)) return;
+  if(!env.GITHUB_DISPATCH_TOKEN||!env.GITHUB_REPO) return;
+  let runId=Number(st.scan_github_run_id?.value||0);
+  if(!runId) {
+    try { runId=await resolveActiveScanRun(env); } catch(e) { console.warn('resolve run',e?.message||e); }
+  }
+  const now=new Date().toISOString();
+  if(!runId) {
+    const requested=Date.parse(st.scan_requested_at?.value||'')||0;
+    const patch={scan_github_checked_at:now};
+    if(requested&&Date.now()-requested>90000) {
+      patch.scan_phase='GitHub Actions: nadal nie znaleziono uruchomionego workflow';
+      patch.last_error='Skan został zlecony, ale przez ponad 90 s nie znaleziono workflow run. Sprawdź Actions, token i branch.';
+    }
+    await setSystemStates(env,patch);
+    return;
+  }
+  const r=await githubRequest(env,`/actions/runs/${runId}`);
+  if(!r.ok){await setSystemStates(env,{scan_github_checked_at:now});return;}
+  const d=await r.json();
+  const ghStatus=String(d.status||'');const conclusion=String(d.conclusion||'');
+  const patch={scan_github_run_id:String(runId),scan_github_status:ghStatus,scan_github_conclusion:conclusion,scan_github_run_url:String(d.html_url||''),scan_github_checked_at:now};
+  if(ghStatus==='queued'||ghStatus==='waiting'||ghStatus==='requested'||ghStatus==='pending') {
+    if(current==='queued') patch.scan_phase='GitHub Actions: w kolejce';
+  } else if(ghStatus==='in_progress') {
+    // main.py will overwrite this with portal-level phases as soon as Python starts.
+    if(current==='queued') patch.scan_status='running';
+    const existingPhase=String(st.scan_phase?.value||'');
+    if(!existingPhase||/GitHub Actions|czekam na runner/i.test(existingPhase)) patch.scan_phase='GitHub Actions: runner pracuje, uruchamiam skaner';
+  } else if(ghStatus==='completed') {
+    if(conclusion==='success') {
+      // Normally scraper/main.py already changed the state to idle. This is a safety net.
+      if(['queued','running','cancelling'].includes(current)) {patch.scan_status='idle';patch.scan_phase='gotowe';}
+    } else if(conclusion==='cancelled') {
+      patch.scan_status='cancelled';patch.scan_phase='zatrzymany';patch.last_error='';
+    } else {
+      patch.scan_status='error';patch.scan_phase=`GitHub Actions: ${conclusion||'błąd'}`;
+      patch.last_error=`Workflow ${runId} zakończył się: ${conclusion||'unknown'}. Otwórz Actions / diagnostykę.`;
+    }
+  }
+  await setSystemStates(env,patch);
 }
 
 async function resolveActiveScanRun(env) {
@@ -612,7 +738,8 @@ async function handleApi(req, env, url) {
     } catch {
       rows = await env.DB.prepare(`SELECT * FROM listings WHERE category='plot' AND COALESCE(source_status,'active')<>'invalid-parser' ORDER BY COALESCE(published_at,first_seen) DESC, id DESC LIMIT 2500`).all();
     }
-    return json({ listings: rows.results || [], stats: await databaseStats(env) },200,{'Cache-Control':'no-store, no-cache, must-revalidate'});
+    const visible=(rows.results || []).filter((r)=>!rejectLegacyPublicListing(r));
+    return json({ listings: visible, stats: await databaseStats(env) },200,{'Cache-Control':'no-store, no-cache, must-revalidate'});
   }
 
   const m = url.pathname.match(/^\/api\/listing\/(\d+)\/history$/);

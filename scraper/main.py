@@ -19,8 +19,8 @@ from app.egib import EGIBResolver
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
-LISTING_PARSER_VERSION='1.4.8-sale-location-blacklist-v2'
-DB_MAINTENANCE_VERSION='1.4.8-blacklist-market-only-v3'
+LISTING_PARSER_VERSION='1.5.1-sale-location-guard-v3'
+DB_MAINTENANCE_VERSION='1.5.1-sale-only-cleanup-v4'
 KNOWN_BAD_URLS={
     'https://www.olx.pl/d/oferta/dzialka-budowlana-20km-od-krakowa-CID3-ID1c8sfW.html':'wrong-zakliczyn-myslenice',
     'https://www.olx.pl/d/oferta/powierzchnia-300m2-CID3-ID1c2K6x.html':'rental-wrong-zakliczyn',
@@ -149,11 +149,14 @@ async def run():
     # Live state consumed by Mini App + Telegram. The scan still runs on GitHub Actions,
     # but the UI receives source-level progress from D1 every few seconds.
     progress={
-        'version':1,
+        'version':2,
         'run_id':os.getenv('GITHUB_RUN_ID') or None,
         'run_url':os.getenv('GITHUB_RUN_URL') or None,
         'trigger':os.getenv('GITHUB_EVENT_NAME') or 'unknown',
         'started_at':started,
+        'heartbeat_at':started,
+        'elapsed_s':0,
+        'running_sources':[],
         'total_sources':len(enabled),
         'done_sources':0,
         'downloaded_records':0,
@@ -278,12 +281,35 @@ async def run():
         print('[BOOT] Chromium OK', flush=True)
         sem=asyncio.Semaphore(max(1,int(cfg['browser'].get('parallel_sources',3))))
         state_lock=asyncio.Lock()
+        heartbeat_stop=asyncio.Event()
+
+        async def heartbeat_loop():
+            # A portal can legitimately take tens of seconds before it finishes. Write a
+            # small heartbeat even when counters do not change so Mini App can prove that
+            # the GitHub runner is alive instead of looking frozen.
+            while not heartbeat_stop.is_set():
+                try:
+                    await asyncio.wait_for(heartbeat_stop.wait(),timeout=4.0)
+                    break
+                except asyncio.TimeoutError:
+                    pass
+                async with state_lock:
+                    progress['heartbeat_at']=datetime.now(timezone.utc).isoformat()
+                    progress['elapsed_s']=max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(started)).total_seconds()))
+                    progress['running_sources']=[x['name'] for x in progress['sources'] if x.get('status')=='running']
+                    snapshot=copy.deepcopy(progress)
+                await live_state_write({'scan_progress':snapshot},'LIVE heartbeat')
+
+        heartbeat_task=asyncio.create_task(heartbeat_loop(),name='scan-heartbeat')
 
         async def mark_source(name,**fields):
             async with state_lock:
                 item=progress_source(name)
                 if item:item.update(fields)
                 running=[x['name'] for x in progress['sources'] if x.get('status')=='running']
+                progress['running_sources']=running
+                progress['heartbeat_at']=datetime.now(timezone.utc).isoformat()
+                progress['elapsed_s']=max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(started)).total_seconds()))
                 phase='portale: '+(', '.join(running[:3]) if running else f"{progress['done_sources']}/{progress['total_sources']}")
                 snapshot=copy.deepcopy(progress)
             # requests is blocking, so run it off the asyncio/Playwright event loop.
@@ -340,6 +366,9 @@ async def run():
                     progress['downloaded_records']=len(all_recs)
                     progress['accepted_records']=len(accepted)
                     progress['rejected_records']=len(rejected)
+                    progress['running_sources']=[x['name'] for x in progress['sources'] if x.get('status')=='running']
+                    progress['heartbeat_at']=datetime.now(timezone.utc).isoformat()
+                    progress['elapsed_s']=max(0,int((datetime.now(timezone.utc)-datetime.fromisoformat(started)).total_seconds()))
                     snapshot=copy.deepcopy(progress)
                     phase=f"portale {progress['done_sources']}/{progress['total_sources']} • {source['name']}"
                 await live_state_write({'scan_progress':snapshot,'scan_phase':phase},f"LIVE done {source['name']}")
@@ -354,6 +383,10 @@ async def run():
             if pending:await asyncio.gather(*pending,return_exceptions=True)
             try:await browser.close()
             except Exception:pass
+            heartbeat_stop.set()
+            heartbeat_task.cancel()
+            try:await heartbeat_task
+            except asyncio.CancelledError:pass
 
     # All portal records are already in D1. From here we finalize expiry and market scoring.
     accepted=list({r['canonical_url']:r for r in accepted}.values())
@@ -384,7 +417,10 @@ async def run():
                 if r.get('price') is not None: db.reset_price_alert_reference(r['canonical_url'],float(r['price']))
             elif meaningful_price_change(ref,r.get('price'),cfg):
                 meaningful_changes+=1;db.mark_meaningful_price_change(r['canonical_url'],ref,float(r['price']))
-                notify.append((r,'price',ref))
+                # Price changes stay in the database/history and can be opened manually,
+                # but production Telegram alerts are new-listing-only by default.
+                if cfg['telegram'].get('notify_price_changes',False):
+                    notify.append((r,'price',ref))
     # First bootstrap is allowed to notify only genuinely fresh publications, never old discoveries.
     for r,kind,old_price in notify:
         try: tg.send(listing_message(r,kind,old_price),r.get('canonical_url'),r.get('image_url'))
@@ -421,7 +457,7 @@ async def run():
     finished=datetime.now(timezone.utc).isoformat(); status='ok' if healthy_count>=max(1,len(diagnostics)//2) else 'warning'
     db.record_scan(started_at=started,finished_at=finished,downloaded_records=len(all_recs),accepted_records=len(accepted),active_after_scan=len(unique),new_count=fresh_new,price_change_count=meaningful_changes,rejected_count=len(rejected),deactivated_count=deactivated,healthy_sources=healthy_count,total_sources=len(diagnostics),diagnostics_json=json.dumps(diagnostics,ensure_ascii=False),status=status)
     db.set_state('listing_parser_version',LISTING_PARSER_VERSION)
-    progress['finished_at']=finished;progress['status']='done';progress['done_sources']=progress['total_sources']
+    progress['finished_at']=finished;progress['heartbeat_at']=finished;progress['status']='done';progress['done_sources']=progress['total_sources'];progress['running_sources']=[]
     progress['downloaded_records']=len(all_recs);progress['accepted_records']=len(accepted);progress['rejected_records']=len(rejected)
     db.set_state('scan_progress',progress)
     try: tg.update_progress(progress,final=True)

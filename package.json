@@ -1,6 +1,6 @@
 {
   "name": "property-radar-cloud",
-  "version": "1.4.9",
+  "version": "1.5.1",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",

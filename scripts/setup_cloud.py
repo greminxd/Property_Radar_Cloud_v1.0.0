@@ -19,6 +19,7 @@ if 'trycloudflare.com' in panel.lower():
     panel=DEFAULT_PANEL_URL
 if not panel.startswith('https://'): raise SystemExit('PANEL_URL musi zaczynać się od https://')
 bot=need('TELEGRAM_BOT_TOKEN'); webhook_secret=need('TELEGRAM_WEBHOOK_SECRET')
+chat_ids=[int(x) for x in __import__('re').findall(r'-?\d+', os.getenv('TELEGRAM_CHAT_IDS',''))]
 url=f'https://api.cloudflare.com/client/v4/accounts/{account}/d1/database/{dbid}/query'
 headers={'Authorization':f'Bearer {token}','Content-Type':'application/json'}
 
@@ -63,7 +64,14 @@ def tg(method,payload):
     if not d.get('ok'):raise SystemExit(f'Telegram {method}: '+str(d))
     return d.get('result')
 
+# Hard reset the webhook and pending queue so Telegram cannot keep retrying stale updates.
+tg('deleteWebhook',{'drop_pending_updates':True})
 tg('setWebhook',{'url':panel+'/telegram/webhook','secret_token':webhook_secret,'allowed_updates':['message','callback_query'],'drop_pending_updates':True})
+wh=tg('getWebhookInfo',{})
+if str((wh or {}).get('url','')).rstrip('/') != (panel+'/telegram/webhook').rstrip('/'):
+    raise SystemExit('Telegram webhook URL mismatch: '+str(wh))
+print('[OK] Webhook verified:', wh.get('url'), 'pending=', wh.get('pending_update_count',0))
+
 tg('setMyCommands',{'commands':[
     {'command':'start','description':'Menu Property Radar'},
     {'command':'nowe','description':'Faktycznie nowe ogłoszenia'},
@@ -74,6 +82,21 @@ tg('setMyCommands',{'commands':[
     {'command':'id','description':'Pokaż Telegram user_id'},
     {'command':'diag','description':'Diagnostyka (admin)'},
 ]})
+# Reset global menu button before setting the stable Worker URL. This invalidates old
+# trycloudflare menu configuration instead of layering a new value on top of it.
+tg('setChatMenuButton',{'menu_button':{'type':'default'}})
 tg('setChatMenuButton',{'menu_button':{'type':'web_app','text':'🏡 Oferty','web_app':{'url':panel}}})
-print('[OK] Telegram webhook + uproszczone komendy + Mini App')
+
+# A per-chat menu override has priority over the global button. Previous versions created
+# such an override, so force-refresh every notification chat as well.
+for cid in sorted(set(chat_ids)):
+    tg('setChatMenuButton',{'chat_id':cid,'menu_button':{'type':'default'}})
+    tg('setChatMenuButton',{'chat_id':cid,'menu_button':{'type':'web_app','text':'🏡 Oferty','web_app':{'url':panel}}})
+    actual=tg('getChatMenuButton',{'chat_id':cid}) or {}
+    actual_url=((actual.get('web_app') or {}).get('url') or '')
+    print(f'[OK] menu chat {cid}: type={actual.get("type")} url={actual_url}')
+    if actual.get('type')!='web_app' or actual_url.rstrip('/')!=panel.rstrip('/'):
+        raise SystemExit(f'Telegram menu mismatch for chat {cid}: {actual}')
+
+print('[OK] Telegram webhook + komendy + Mini App menu')
 print('Webhook:',panel+'/telegram/webhook')

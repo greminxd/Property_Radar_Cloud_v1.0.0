@@ -202,8 +202,7 @@ function card(r){
     <div class="location">📍 ${esc(loc(r))} · ${esc(r.source||'?')}</div>
     <div class="numbers"><div class="num"><span>Cena</span><b>${fmtMoney(r.price)}</b></div><div class="num"><span>Powierzchnia</span><b>${fmtArea(r.area_m2)}</b></div><div class="num"><span>Cena / m²</span><b>${fmtPpm(r.price_m2)}</b></div></div>
     <div class="badges">${badges}</div>
-    ${isPlot?analyticsHtml(r):''}
-    ${isPlot?`<div class="price-position">💡 ${esc(pricePosition(r))}</div>`:''}
+    ${isPlot?`<div class="market-compact"><span>📢 vs ogłoszenia <b>${pctText(marketDeltaPct(r))}</b></span><span>🏛 vs RCN <b>${pctText(rcnDeltaPct(r))}</b></span></div>`:''}
     <div class="meta-line"><span>🗓 dodane na portalu: <b>${dateOnly(r.published_at)}</b></span>${r.updated_at?`<span>↻ aktualizacja: ${dateOnly(r.updated_at)}</span>`:''}<span>📡 Radar zobaczył: ${dateOnly(r.first_seen)}</span></div>
     ${archived&&r.archive_reason?`<div class="archive-note">⚠ ${esc(r.archive_reason)}</div>`:''}
     <div class="card-actions"><a class="open-btn" href="${esc(r.canonical_url)}" target="_blank" rel="noopener">Otwórz ogłoszenie</a>${phone}<button class="detail-btn" data-detail="${r.id}">Szczegóły</button></div>
@@ -256,6 +255,7 @@ function selectQuick(name){
   else if(name==='drops'){state.status='active';state.age='all';state.onlyPriceChanges=true;}
   else if(name==='phone'){state.status='active';state.age='30';state.onlyPhone=true;}
   else if(name==='large'){state.status='active';state.age='30';state.minArea='1500';}
+  else if(name==='all'){state.status='active';state.age='all';}
   else if(name==='reset'){resetFilters(); quick='30d';$$('[data-quick]').forEach(x=>x.classList.toggle('active',x.dataset.quick==='30d'));}
   syncStateToInputs(); render();
 }

@@ -317,7 +317,7 @@ function nextScanLabel() {
 }
 
 async function botStatus(env) {
-  const db=await databaseStats(env);const st=await systemState(env);const last=db.last_scan;const diags=parseDiag(last);
+  const [db,st]=await Promise.all([databaseStats(env),systemState(env)]);const last=db.last_scan;const diags=parseDiag(last);
   let scanState=st.scan_status?.value||'idle';
   const started=st.scan_started_at?.value; if(scanState==='running'&&started){const age=(Date.now()-new Date(started).getTime())/60000;if(age>70)scanState='stale';}
   return {...db,system:st,scan_state:scanState,diagnostics:diags,next_scan:nextScanLabel()};
@@ -437,11 +437,9 @@ async function dispatchScan(env) {
   };
 }
 
-async function handleTelegram(req, env) {
-  const secret=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';
-  if(!env.TELEGRAM_WEBHOOK_SECRET||!timingSafeEqual(secret,env.TELEGRAM_WEBHOOK_SECRET))return new Response('forbidden',{status:403});
-  const update=await req.json();const callback=update.callback_query;const msg=update.message;
-  const chatId=String(callback?.message?.chat?.id||msg?.chat?.id||'');const userId=String(callback?.from?.id||msg?.from?.id||'');const role=telegramRole(env,userId);const origin=new URL(req.url).origin;
+async function handleTelegramUpdate(update, env, origin) {
+  const callback=update?.callback_query;const msg=update?.message;
+  const chatId=String(callback?.message?.chat?.id||msg?.chat?.id||'');const userId=String(callback?.from?.id||msg?.from?.id||'');const role=telegramRole(env,userId);
   async function send(text,markup=mainMenu(origin,role)){if(!chatId)return;await telegramApi(env,'sendMessage',{chat_id:chatId,text,parse_mode:'HTML',disable_web_page_preview:true,reply_markup:markup});}
   async function sendListing(r,mode='new'){
     if(!chatId)return;
@@ -458,13 +456,14 @@ user_id: <code>${escapeHtml(userId)}</code>`,{inline_keyboard:[]});return new Re
   if(!role){await send(`⛔ Brak dostępu.
 Twój user_id: <code>${escapeHtml(userId)}</code>`,{inline_keyboard:[]});return new Response('ok');}
   if(!callback && text==='/start'){
-    // Repair a stale Telegram bottom menu button (e.g. an old trycloudflare tunnel)
-    // directly from the current Worker origin.
+    // Force-refresh the per-chat menu button. setChatMenuButton requires an integer chat_id;
+    // sending it as a string was silently caught before and left the stale trycloudflare URL in Telegram.
+    const cid=Number(chatId);
     try {
-      await telegramApi(env,'setChatMenuButton',{
-        chat_id: chatId,
-        menu_button:{type:'web_app',text:'🏡 Oferty',web_app:{url:origin}}
-      });
+      if(Number.isSafeInteger(cid)){
+        await telegramApi(env,'setChatMenuButton',{chat_id:cid,menu_button:{type:'default'}});
+        await telegramApi(env,'setChatMenuButton',{chat_id:cid,menu_button:{type:'web_app',text:'🏡 Oferty',web_app:{url:origin}}});
+      }
     } catch(e) { console.warn('setChatMenuButton repair failed', e?.message||e); }
     await send(`🏡 <b>PROPERTY RADAR</b>
 Alerty tylko dla faktycznie nowych publikacji i istotnych zmian ceny.
@@ -472,12 +471,14 @@ Skan automatyczny: <b>09:00 / 20:00</b>.`,mainMenu(origin,role));
     return new Response('ok');
   }
   if(callback){
-    try{await telegramApi(env,'answerCallbackQuery',{callback_query_id:callback.id});}catch{}
+    // ACK and data lookup run in parallel; do not block status/menu rendering on a Telegram round-trip.
+    const ack=telegramApi(env,'answerCallbackQuery',{callback_query_id:callback.id}).catch(()=>null);
+    const done=async(p)=>{await Promise.all([ack,p]);return new Response('ok');};
     const data=callback.data||'';
-    if(data==='status:short'){const s=await botStatus(env);await send(statusShortText(s),{inline_keyboard:[[{text:'📋 Pełny status',callback_data:'status:long'}],[{text:'⬅️ Menu',callback_data:'menu'}]]});return new Response('ok');}
-    if(data==='status:long'){const s=await botStatus(env);await send(statusLongText(s),{inline_keyboard:[[{text:'📊 Krótki status',callback_data:'status:short'}],[{text:'⬅️ Menu',callback_data:'menu'}]]});return new Response('ok');}
-    if(data==='database'){await send(databaseStatusText(await databaseStats(env)));return new Response('ok');}
-    if(data==='menu'){await send(`🏡 <b>PROPERTY RADAR</b>\nWybierz funkcję:`,mainMenu(origin,role));return new Response('ok');}
+    if(data==='status:short'){const s=await botStatus(env);return await done(send(statusShortText(s),{inline_keyboard:[[{text:'📋 Pełny status',callback_data:'status:long'}],[{text:'⬅️ Menu',callback_data:'menu'}]]}));}
+    if(data==='status:long'){const s=await botStatus(env);return await done(send(statusLongText(s),{inline_keyboard:[[{text:'📊 Krótki status',callback_data:'status:short'}],[{text:'⬅️ Menu',callback_data:'menu'}]]}));}
+    if(data==='database'){const d=await databaseStats(env);return await done(send(databaseStatusText(d)));}
+    if(data==='menu'){return await done(send(`🏡 <b>PROPERTY RADAR</b>\nWybierz funkcję:`,mainMenu(origin,role)));}
     if(data==='diag'){
       if(role!=='admin'){await send('⛔ Diagnostyka tylko dla administratora.');return new Response('ok');}
       let db='OK';try{await env.DB.prepare('SELECT 1').first();}catch(e){db='BŁĄD: '+String(e?.message||e)}
@@ -586,14 +587,14 @@ export default {
       if (url.pathname.startsWith('/api/')) return await handleApi(req, env, url);
 
       if (url.pathname === '/telegram/webhook' && req.method === 'POST') {
-        // Telegram gets HTTP 200 immediately. Heavy D1/status work and Telegram replies
-        // continue in the background, so updates do not queue for minutes.
+        // Validate and read the tiny Telegram update before returning 200, then process the
+        // plain object in waitUntil. This avoids keeping a Request body alive after response.
         const secret=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';
         if(!env.TELEGRAM_WEBHOOK_SECRET||!timingSafeEqual(secret,env.TELEGRAM_WEBHOOK_SECRET)) {
           return new Response('forbidden',{status:403});
         }
-        const cloned=req.clone();
-        ctx.waitUntil(handleTelegram(cloned,env).catch(e=>console.error('telegram background',e)));
+        const update=await req.json().catch(()=>null);
+        if(update) ctx.waitUntil(handleTelegramUpdate(update,env,url.origin).catch(e=>console.error('telegram background',e)));
         return new Response('ok',{status:200});
       }
 

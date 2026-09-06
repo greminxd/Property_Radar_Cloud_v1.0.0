@@ -3,7 +3,6 @@ import asyncio,copy,json,os,sys,time,traceback
 from datetime import datetime,timezone,timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
-from dateutil.relativedelta import relativedelta
 from statistics import median,mean
 from playwright.async_api import async_playwright
 
@@ -16,13 +15,18 @@ from app.utils import haversine_km,fingerprint
 from app.dates import normalize_published
 from app.scoring import enrich_scores
 from app.telegram_notify import TelegramNotify,listing_message
-from app.rcn import RCNClient, RCN_PARSER_VERSION
 from app.egib import EGIBResolver
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
-LISTING_PARSER_VERSION='1.4.7-live-sale-zakliczyn-v1'
-DB_MAINTENANCE_VERSION='1.4.7-purge-olx-rent-v1'
+LISTING_PARSER_VERSION='1.4.8-sale-location-blacklist-v2'
+DB_MAINTENANCE_VERSION='1.4.8-blacklist-market-only-v3'
+KNOWN_BAD_URLS={
+    'https://www.olx.pl/d/oferta/dzialka-budowlana-20km-od-krakowa-CID3-ID1c8sfW.html':'wrong-zakliczyn-myslenice',
+    'https://www.olx.pl/d/oferta/powierzchnia-300m2-CID3-ID1c2K6x.html':'rental-wrong-zakliczyn',
+    'https://www.olx.pl/d/oferta/nowy-kolowrotek-samolla-ksn-8000-12-1-bb-karpiowy-surfcasting-1-sztuki-CID767-ID1ccuyw.html':'not-property',
+    'https://www.olx.pl/d/oferta/nowy-kolowrotek-samolla-ksn-8000-12-1-bb-karpiowy-surfcasting-3-sztuki-CID767-ID1ccupp.html':'not-property',
+}
 
 def need(name):
     v=os.getenv(name,'').strip()
@@ -80,6 +84,19 @@ async def run():
         except:pass
         print(f'[FATAL] D1 preflight failed: {type(e).__name__}: {e}', flush=True); raise
 
+    # Make the deny-list self-healing even if a scan is run before Setup Cloud.
+    try:
+        db.execute("""CREATE TABLE IF NOT EXISTS listing_blacklist (canonical_url TEXT PRIMARY KEY, reason TEXT, source TEXT, title TEXT, created_at TEXT NOT NULL)""")
+    except Exception as e:
+        print(f'[WARN] blacklist table init: {type(e).__name__}: {e}',flush=True)
+
+    # Seed confirmed production false positives. They are deleted now and cannot return.
+    try:
+        for bad_url,reason in KNOWN_BAD_URLS.items():
+            db.blacklist_url(bad_url,reason,'OLX',None)
+    except Exception as e:
+        print(f'[WARN] blacklist seed: {type(e).__name__}: {e}',flush=True)
+
     tg=TelegramNotify(os.getenv('TELEGRAM_BOT_TOKEN'),os.getenv('TELEGRAM_CHAT_IDS') or os.getenv('TELEGRAM_CHAT_ID'),os.getenv('PANEL_URL',''))
     scraper=Scraper(cfg); geocoder=Geocoder(db,cfg['center']); egib=EGIBResolver(db,cfg['center'])
     all_recs=[]; accepted=[]; rejected=[]; changes=[]; errs=[]; diagnostics=[]; healthy_sources=[]
@@ -93,16 +110,16 @@ async def run():
     purged_outside_area=0
     if maintenance_needed or parser_migration:
         try:
+            for bad_url,bad_reason in KNOWN_BAD_URLS.items():
+                try: db.block_url(bad_url,bad_reason)
+                except Exception as e: print(f'[BOOT] blocklist seed warning {bad_url}: {e}',flush=True)
             existing=db.query("SELECT canonical_url,source,title,location,description FROM listings")
             bad=[]; reasons={}
             hard_prefixes=('explicit-outside','known-gmina-outside-target','conflicting-locality','unknown-locality-in-target-gmina')
             for row in existing:
                 why=None
-                if row.get('source')=='OLX':
-                    # v1.4.7 deliberately rebuilds OLX from scratch because older rows can
-                    # contain wrong Zakliczyn/rental false positives that cannot be safely
-                    # distinguished after the old geocoder overwrote their coordinates.
-                    why='olx-rebuild-v147'
+                if row.get('canonical_url') in KNOWN_BAD_URLS:
+                    why=KNOWN_BAD_URLS[row.get('canonical_url')]
                 elif is_rental_offer(row.get('title') or '',row.get('description') or '','',row.get('canonical_url') or ''):
                     why='rental-offer'
                 if why is None:
@@ -126,6 +143,8 @@ async def run():
             print(f'[BOOT] DB maintenance: checked={len(existing)} deleted={purged_outside_area} reasons={reasons}',flush=True)
         except Exception as e:
             print(f'[BOOT] DB maintenance warning: {type(e).__name__}: {e}',flush=True)
+
+    blocked_urls=db.blocked_urls()
 
     # Live state consumed by Mini App + Telegram. The scan still runs on GitHub Actions,
     # but the UI receives source-level progress from D1 every few seconds.
@@ -169,8 +188,11 @@ async def run():
 
     def normalize_batch(records):
         batch_ok=[]; batch_rejected=[]
+        blocked=set(db.blacklist_map().keys())
         for rec0 in records:
             r=dict(rec0)
+            if r.get('canonical_url') in blocked:
+                batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'reason':'blacklisted'}); continue
             jsonld=r.pop('_jsonld',[]); body=r.pop('_body','')
             fold=body.lower().replace('ł','l')
             if is_rental_offer(r.get('title') or '',r.get('description') or body,'',r.get('canonical_url') or ''):
@@ -184,7 +206,7 @@ async def run():
                 if olx_lat is not None and olx_lon is not None:
                     olx_d=haversine_km(cfg['center']['lat'],cfg['center']['lon'],float(olx_lat),float(olx_lon))
                     r['lat']=float(olx_lat);r['lon']=float(olx_lon);r['distance_km']=olx_d
-                    if olx_d>20.0:
+                    if olx_d>max(12.0,float(cfg.get('center',{}).get('radius_km',10.0))):
                         batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':olx_d,'reason':'olx-structured-geo-outside-target'}); continue
                 elif (r.get('location') or '').strip().lower()=='zakliczyn':
                     target_text=(str(r.get('title') or '')+' '+str(r.get('description') or '')+' '+body).lower().replace('ł','l')
@@ -242,8 +264,6 @@ async def run():
             r['fingerprint']=fingerprint(r.get('title',''),r.get('area_locality') or r.get('location',''),r.get('area_m2'),r.get('price'),r.get('parcel_number'))
             r['privacy_score']=None;r['privacy_reasons']=''
             r['deal_label']='liczę po skanie';r['median_comparable']=None;r['market_mean_comparable']=None;r['comparable_count']=0;r['comparison_quality']=''
-            for k in ['rcn_median_ppm','rcn_mean_ppm','rcn_radius_km','rcn_last_date','rcn_last_ppm','rcn_history_last_date','rcn_history_last_price','rcn_history_last_ppm','rcn_history_match']:r[k]=None
-            r['rcn_count']=0;r['rcn_months']=int(cfg.get('rcn',{}).get('months',24));r['rcn_quality']='brak danych';r['rcn_history_count']=0
             batch_ok.append(r)
         # A source can occasionally expose the same canonical URL more than once.
         return list({r['canonical_url']:r for r in batch_ok}.values()),batch_rejected
@@ -297,7 +317,10 @@ async def run():
                 if batch_ok:
                     try:
                         portal_changes=await asyncio.to_thread(db.upsert_many,batch_ok)
-                        changes.extend(portal_changes); accepted.extend(batch_ok)
+                        changes.extend(portal_changes)
+                        persisted_urls={x[0].get('canonical_url') for x in portal_changes}
+                        persisted=[x for x in batch_ok if x.get('canonical_url') in persisted_urls]
+                        accepted.extend(persisted)
                     except Exception as e:
                         persisted=[]
                         msg=f"{source['name']}: D1 persist {type(e).__name__}: {e}"
@@ -332,74 +355,16 @@ async def run():
             try:await browser.close()
             except Exception:pass
 
-    # All portal records are already in D1. From here we only finalize expiry,
-    # RCN and market scoring.
+    # All portal records are already in D1. From here we finalize expiry and market scoring.
     accepted=list({r['canonical_url']:r for r in accepted}.values())
     db.set_state('scan_phase','finalizacja ofert')
     threshold=int(cfg.get('retention',{}).get('missing_scans_before_inactive',3)); deactivated=db.age_missing_for_healthy_sources(healthy_sources,threshold)
 
-    # Real transaction prices from GUGiK RCN WFS. Benchmark uses a recent window,
-    # while exact parcel purchase history is retained much longer.
-    rcn_rows=[]; rcn_all=[]
-    if cfg.get('rcn',{}).get('enabled',True):
-        db.set_state('scan_phase','RCN transakcje')
-        rcfg=cfg['rcn']; months=int(rcfg.get('months',24)); history_months=max(months,int(rcfg.get('history_months',120)))
-        cutoff=(datetime.now(timezone.utc)-relativedelta(months=months)).isoformat()
-        history_cutoff=(datetime.now(timezone.utc)-relativedelta(months=history_months)).isoformat()
-        state=db.query("SELECT value FROM system_state WHERE key='rcn_parser_version'")
-        current_version=(state[0].get('value') if state else None)
-        force_rcn_refresh=current_version!=RCN_PARSER_VERSION
-        if force_rcn_refresh:
-            print(f'[RCN] parser cache migration {current_version!r} -> {RCN_PARSER_VERSION}; czyszczę stare transakcje',flush=True)
-            db.execute('DELETE FROM rcn_transactions')
-            db.set_state('rcn_parser_version',RCN_PARSER_VERSION)
-        last_rcn=db.query("SELECT MAX(fetched_at) last_fetch FROM rcn_transactions")
-        last_fetch=(last_rcn[0].get('last_fetch') if last_rcn else None)
-        refresh=True
-        if last_fetch and not force_rcn_refresh:
-            try:
-                lf=datetime.fromisoformat(str(last_fetch).replace('Z','+00:00')).astimezone(ZoneInfo('Europe/Warsaw'))
-                refresh=lf.date()!=datetime.now(ZoneInfo('Europe/Warsaw')).date()
-            except Exception: pass
-        if force_rcn_refresh: refresh=True
-        if refresh:
-            try:
-                db.set_state('rcn_status',{'state':'refreshing','benchmark_months':months,'history_months':history_months})
-                rc=RCNClient(cfg['center']['lat'],cfg['center']['lon'],rcfg)
-                print(f"[RCN] odświeżam realne transakcje; benchmark {months} mies., historia działki {history_months} mies...",flush=True)
-                fresh_rows=await asyncio.to_thread(rc.fetch_recent,history_months,float(rcfg.get('fetch_radius_km',12)),int(rcfg.get('max_features',2500)))
-                print(f'[RCN] pobrane transakcje po filtrze: {len(fresh_rows)}',flush=True)
-                db.upsert_rcn_transactions(fresh_rows); db.purge_old_rcn(history_cutoff)
-                newest=max((x.get('transaction_date') or '' for x in fresh_rows),default=None)
-                db.set_state('rcn_status',{'state':'ok','fetched':len(fresh_rows),'benchmark_months':months,'history_months':history_months,'newest':newest,'refreshed_at':datetime.now(timezone.utc).isoformat()})
-            except Exception as e:
-                errs.append('RCN refresh: '+str(e));print(f'[RCN] warning: {type(e).__name__}: {e}; używam cache D1',flush=True)
-                try:db.set_state('rcn_status',{'state':'error','error':f'{type(e).__name__}: {e}','benchmark_months':months,'history_months':history_months})
-                except Exception:pass
-        else:
-            print('[RCN] cache z dzisiaj — bez ponownego pobierania WFS',flush=True)
-        try:
-            rcn_all=db.get_rcn_recent(history_cutoff)
-            rcn_rows=[x for x in rcn_all if str(x.get('transaction_date') or '')>=cutoff]
-            print(f'[RCN] D1: benchmark {len(rcn_rows)} trans. / historia {len(rcn_all)} trans.',flush=True)
-        except Exception as e:
-            errs.append('RCN cache: '+str(e));print(f'[RCN] cache error: {e}',flush=True);rcn_rows=[];rcn_all=[]
-
+    # Market scoring is based only on current asking prices per m².
     db.set_state('scan_phase','analiza cen')
     active=db.all_active(); unique=market_unique(active)
-    rc_an=RCNClient(cfg['center']['lat'],cfg['center']['lon'],cfg.get('rcn',{})) if cfg.get('rcn',{}).get('enabled',True) else None
     for r in active:
         enrich_scores(r,unique,cfg)
-        # Never retain a stale/broken RCN score if the current scan cannot build a
-        # trustworthy comparable set. Exact parcel history is a separate signal.
-        for k in ['rcn_median_ppm','rcn_mean_ppm','rcn_radius_km','rcn_last_date','rcn_last_ppm','rcn_history_last_date','rcn_history_last_price','rcn_history_last_ppm','rcn_history_match']: r[k]=None
-        r['rcn_count']=0; r['rcn_months']=int(cfg.get('rcn',{}).get('months',24)); r['rcn_quality']='brak wiarygodnych porównań';r['rcn_history_count']=0
-        if rc_an and rcn_rows:
-            r.update(rc_an.analyze(r,rcn_rows,int(cfg['rcn'].get('months',24)),int(cfg['rcn'].get('minimum_comparables',3))))
-        if rc_an and rcn_all and (r.get('parcel_id') or r.get('parcel_number')):
-            hist=rc_an.find_parcel_history(r,rcn_all,float(cfg.get('rcn',{}).get('history_fallback_distance_km',2.5)))
-            if hist:
-                last=hist[0];r['rcn_history_count']=len(hist);r['rcn_history_last_date']=last.get('transaction_date');r['rcn_history_last_price']=last.get('price');r['rcn_history_last_ppm']=last.get('price_m2');r['rcn_history_match']=last.get('history_match')
     db.update_scores(active)
     active=db.all_active(); unique=market_unique(active); byurl={r['canonical_url']:r for r in active}
 
@@ -428,14 +393,12 @@ async def run():
     plots=sum(1 for x in unique if x.get('category')=='plot'); phones=sum(1 for x in unique if x.get('phone'))
     ppms=[float(x['price_m2']) for x in unique if x.get('category')=='plot' and x.get('price_m2') and 1<=float(x['price_m2'])<=5000]
     market_line=f"mediana {median(ppms):.1f} zł/m² • średnia {mean(ppms):.1f} zł/m²" if ppms else 'brak danych cenowych'
-    rvals=[float(x['price_m2']) for x in rcn_rows if x.get('price_m2') and 0.5<=float(x['price_m2'])<=3000]
-    rcn_line=f"RCN mediana {median(rvals):.1f} • średnia {mean(rvals):.1f} zł/m² ({len(rvals)} trans.)" if rvals else 'RCN: brak/awaria'
     healthy_count=sum(1 for d in diagnostics if d.get('healthy'))
     summary=(f"🏡 <b>PROPERTY RADAR — SKAN GOTOWY</b>\n"
              f"🟢 Aktywne działki: {plots}\n"
              f"🔎 Pobrano: {len(all_recs)} • przyjęto: {len(accepted)} • źródła OK: {healthy_count}/{len(diagnostics)}\n"
              f"🆕 Faktycznie nowe: {fresh_new} • odkryte pierwszy raz: {discovered_new} • 📉 istotne zmiany cen: {meaningful_changes}\n"
-             f"📢 {market_line}\n🏛 {rcn_line}\n"
+             f"📢 {market_line}\n"
              f"🚫 Odrzucone: {len(rejected)} • wygaszone: {deactivated}")
     if cfg['telegram'].get('send_scan_summary',False):
         try:tg.send(summary)
@@ -465,7 +428,7 @@ async def run():
     except Exception as e: errs.append('Telegram live final: '+str(e))
     db.set_state('scan_github_run_id','')
     db.set_state('scan_status','idle');db.set_state('scan_phase','gotowe');db.set_state('last_scan_finished_at',finished);db.set_state('last_error','\n'.join(errs[-8:]) if errs else '')
-    (LOGS/'scan_diagnostics.json').write_text(json.dumps({'downloaded':len(all_recs),'accepted':len(accepted),'active':len(unique),'fresh_new':fresh_new,'meaningful_price_changes':meaningful_changes,'rcn_transactions_benchmark':len(rcn_rows),'rcn_transactions_history':len(rcn_all),'location_validation':location_validation,'sources':diagnostics},ensure_ascii=False,indent=2),encoding='utf-8')
+    (LOGS/'scan_diagnostics.json').write_text(json.dumps({'downloaded':len(all_recs),'accepted':len(accepted),'active':len(unique),'fresh_new':fresh_new,'meaningful_price_changes':meaningful_changes,'location_validation':location_validation,'sources':diagnostics},ensure_ascii=False,indent=2),encoding='utf-8')
     (LOGS/'rejected_area.json').write_text(json.dumps(rejected,ensure_ascii=False,indent=2),encoding='utf-8')
     (LOGS/'last_errors.txt').write_text('\n'.join(errs),encoding='utf-8')
     print(summary.replace('<b>','').replace('</b>',''));print(f'Błędy/ostrzeżenia: {len(errs)}')

@@ -6,184 +6,98 @@
   <meta name="robots" content="noindex,nofollow,noarchive" />
   <meta name="theme-color" content="#f5f5f7" />
   <meta name="color-scheme" content="light" />
-  <title>Property Radar · działki</title>
-  <link rel="stylesheet" href="/styles.css?v=147" />
+  <title>Property Radar</title>
+  <link rel="stylesheet" href="/styles.css?v=1483" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <div id="login" class="login-shell hidden">
-    <form id="loginForm" class="login-card">
-      <div class="logo">PR</div>
-      <h1>Property Radar</h1>
-      <p>Prywatny panel ofert — Zdonia, Zakliczyn, Słona i bliskie okolice.</p>
-      <label>Hasło</label>
-      <input id="password" type="password" autocomplete="current-password" placeholder="••••••••••••" required />
-      <button type="submit" class="primary">Zaloguj</button>
+    <form id="loginForm" class="login-card glass">
+      <div class="app-mark">PR</div>
+      <span class="overline">PROPERTY RADAR</span>
+      <h1>Twoje działki.<br><em>Bez szumu.</em></h1>
+      <p>Prywatny radar ofert sprzedaży dla Zakliczyna nad Dunajcem i wybranych okolic.</p>
+      <input id="password" type="password" autocomplete="current-password" placeholder="Hasło panelu" required />
+      <button type="submit" class="btn primary wide">Zaloguj</button>
       <div id="loginError" class="error"></div>
     </form>
   </div>
 
   <div id="app" class="app hidden">
     <header class="topbar">
-      <div class="brand">
-        <div class="brand-icon">PR</div>
-        <div class="brand-copy"><strong>Property Radar</strong><span>Zdonia · Zakliczyn · Słona + okolice</span></div>
-      </div>
-      <div class="top-actions">
-        <span class="schedule">09:07 · 20:07</span>
-        <button id="logoutBtn" class="ghost mini" title="Wyloguj">Wyloguj</button>
+      <div class="topbar-inner">
+        <div class="wordmark"><div class="app-mark small">PR</div><div><span>PROPERTY RADAR</span><strong>Działki</strong></div></div>
+        <div class="top-actions"><span class="region-chip">Zakliczyn · Tarnów</span><button id="logoutBtn" class="circle-btn" title="Wyloguj">•••</button></div>
       </div>
     </header>
 
-    <main>
-      <section id="scanCommand" class="scan-command">
-        <div class="scan-summary">
+    <main class="page">
+      <section id="scanCommand" class="scan-island glass">
+        <div class="scan-top">
+          <div class="scan-orb"><span></span></div>
           <div class="scan-copy">
-            <span class="eyebrow">STATUS SKANU · LIVE</span>
-            <div class="scan-heading-line">
-              <h2 id="scanHeadline">Radar gotowy</h2>
-              <span id="scanStateBadge" class="scan-state-badge ready"><i></i> GOTOWY</span>
-            </div>
-            <div id="scanPhase" class="scan-phase">Oczekiwanie na następny skan.</div>
+            <div class="scan-meta"><span id="scanStateBadge" class="status-pill ready">GOTOWY</span><strong id="scanProgressText">—</strong></div>
+            <h2 id="scanHeadline">Radar gotowy</h2>
+            <p id="scanPhase">Oczekiwanie na następny skan.</p>
           </div>
-          <div class="scan-controls">
-            <button id="scanNowBtn" class="scan-btn primary-action"><span>▶</span> Skanuj teraz</button>
-            <button id="stopScanBtn" class="scan-btn stop-action" disabled><span>■</span> Zatrzymaj</button>
-            <button id="refreshScanBtn" class="scan-btn subtle-action" title="Odśwież status">↻</button>
-          </div>
+          <button id="refreshScanBtn" class="circle-btn refresh" title="Odśwież status">↻</button>
         </div>
-        <div class="scan-progress-row">
-          <div class="scan-progress-track"><div id="scanProgressBar" class="scan-progress-bar"></div></div>
-          <b id="scanProgressText" class="scan-progress-text">—</b>
+        <div class="progress-track"><span id="scanProgressBar"></span></div>
+        <div class="scan-numbers">
+          <div><small>Pobrano</small><b id="scanDownloaded">0</b></div>
+          <div><small>Przyjęto</small><b id="scanAccepted">0</b></div>
+          <div><small>Ostatni / start</small><b id="scanStarted">—</b></div>
+          <div class="next"><small>Następny skan</small><b id="scanNext">—</b></div>
         </div>
-        <div class="scan-live-metrics">
-          <div><span>Pobrano</span><b id="scanDownloaded">0</b></div>
-          <div><span>Przyjęto</span><b id="scanAccepted">0</b></div>
-          <div><span>Następny skan</span><b id="scanNext">—</b></div>
-          <div><span>Ostatni / start</span><b id="scanStarted">—</b></div>
-        </div>
-        <details class="scan-details">
-          <summary>Źródła i diagnostyka skanu</summary>
-          <div id="scanSources" class="scan-sources"></div>
-        </details>
+        <div class="scan-buttons"><button id="scanNowBtn" class="btn primary">▶ Skanuj teraz</button><button id="stopScanBtn" class="btn danger" disabled>■ Zatrzymaj</button></div>
+        <details class="scan-details"><summary>Źródła i diagnostyka <span>›</span></summary><div id="scanSources" class="source-grid"></div></details>
       </section>
 
-      <section class="overview-grid">
-        <div class="market-card">
-          <div class="market-card-head"><span class="eyebrow">RYNEK OFERTOWY</span><span class="market-type">ogłoszenia</span></div>
-          <div class="market-duo">
-            <div><span>Mediana</span><b id="marketMedian">—</b></div>
-            <div><span>Średnia</span><b id="marketMean">—</b></div>
-          </div>
-          <div class="muted market-note">Aktywne działki z poprawną ceną za m².</div>
-        </div>
-        <div class="market-card rcn-card">
-          <div class="market-card-head"><span class="eyebrow">RCN · 24 MIES.</span><span class="market-type">transakcje</span></div>
-          <div class="market-duo">
-            <div><span>Mediana</span><b id="rcnMedian">—</b></div>
-            <div><span>Średnia</span><b id="rcnMean">—</b></div>
-          </div>
-          <div id="rcnMeta" class="muted market-note">Transakcje: —</div>
-        </div>
-        <div class="stats-grid top-stats">
-          <div class="stat"><b id="statActive">0</b><span>Aktywne</span></div>
-          <div class="stat"><b id="stat30">0</b><span>≤30 dni</span></div>
-          <div class="stat"><b id="statArchived">0</b><span>Archiwalne</span></div>
-          <div class="stat"><b id="statPhone">0</b><span>Z telefonem</span></div>
+      <section class="market-panel">
+        <div class="market-copy"><span class="overline">RYNEK OFERTOWY · TYLKO CENA / M²</span><h1>Co dziś jest<br><em>warte uwagi?</em></h1><p id="lastScan">Ostatni skan: —</p></div>
+        <div class="market-card glass">
+          <div class="market-main"><span>Mediana</span><strong id="marketMedian">—</strong><small>aktywnych porównywalnych ofert</small></div>
+          <div class="market-side"><div><span>Średnia</span><b id="marketMean">—</b></div><div><span>Aktywne</span><b id="statActive">0</b></div></div>
         </div>
       </section>
-      <div id="lastScan" class="scan-caption">Ostatni skan: —</div>
 
-      <section class="browse-shell">
-        <div class="toolbar">
-          <div class="searchbox"><span>⌕</span><input id="search" placeholder="Szukaj miejscowości, działki, telefonu, opisu…" /></div>
-          <button id="filtersBtn" class="primary compact">Filtry <span id="filterCount" class="filter-count">0</span></button>
-        </div>
+      <section class="metric-strip">
+        <div><span>Świeże ≤30 dni</span><b id="stat30">0</b></div>
+        <div><span>Z telefonem</span><b id="statPhone">0</b></div>
+        <div><span>Zablokowane śmieci</span><b id="statBlocked">0</b></div>
+      </section>
 
-        <div class="quick-wrap">
-          <section class="quick" id="quickFilters">
-            <button class="pill active" data-quick="30d">30 dni</button>
-            <button class="pill" data-quick="7d">Nowe 7 dni</button>
-            <button class="pill" data-quick="drops">Spadki cen</button>
-            <button class="pill" data-quick="phone">Telefon</button>
-            <button class="pill" data-quick="large">1500+ m²</button>
-            <button class="pill" data-quick="all">Wszystkie</button>
-            <button class="pill reset-pill" data-quick="reset">Reset</button>
-          </section>
-        </div>
-
-        <section class="result-head">
-          <div><b id="resultCount">0</b> ofert <span id="activePreset" class="muted">• aktywne • publikacja ≤30 dni</span></div>
-          <select id="sort" aria-label="Sortowanie">
-            <option value="published">Najnowsze</option>
-            <option value="updated">Ostatnio zmienione</option>
-            <option value="distance">Najbliżej</option>
-            <option value="priceAsc">Cena ↑</option>
-            <option value="priceDesc">Cena ↓</option>
-            <option value="ppm">Cena/m² ↑</option>
-            <option value="areaDesc">Powierzchnia ↓</option>
-            <option value="rcnDelta">Najlepiej vs RCN</option>
-          </select>
-        </section>
+      <section class="browser glass">
+        <div class="browser-heading"><div><span class="overline">OFERTY</span><h2>Przeglądaj jak katalog.</h2></div><div class="result-count"><b id="resultCount">0</b><span>ofert</span></div></div>
+        <div class="browser-top"><div class="searchbox"><span>⌕</span><input id="search" placeholder="Miejscowość, nr działki, opis…" /></div><button id="filtersBtn" class="filter-btn">Filtry <b id="filterCount">0</b></button></div>
+        <div id="quickFilters" class="quick"><button class="chip active" data-quick="30d">30 dni</button><button class="chip" data-quick="7d">Nowe</button><button class="chip" data-quick="drops">Spadki cen</button><button class="chip" data-quick="phone">Telefon</button><button class="chip" data-quick="large">1500+ m²</button><button class="chip" data-quick="all">Wszystkie</button></div>
+        <div class="browser-foot"><span id="activePreset">• aktywne • ≤30 dni</span><select id="sort"><option value="published">Najnowsze</option><option value="updated">Ostatnio zmienione</option><option value="distance">Najbliżej</option><option value="priceAsc">Cena ↑</option><option value="priceDesc">Cena ↓</option><option value="ppm">Najtaniej / m²</option><option value="areaDesc">Największe</option></select></div>
       </section>
 
       <section id="cards" class="cards"></section>
+      <div class="footer-note">Property Radar · prywatny feed działek · tylko sprzedaż</div>
     </main>
 
     <aside id="filters" class="drawer" aria-hidden="true">
-      <div class="drawer-head"><div><strong>Filtry ofert</strong><span>Połącz kilka kryteriów naraz</span></div><button id="filtersClose" class="icon-btn">×</button></div>
+      <div class="drawer-handle"></div>
+      <div class="drawer-head"><div><span class="overline">FILTRY</span><strong>Dopasuj feed</strong></div><button id="filtersClose" class="circle-btn">×</button></div>
       <div class="drawer-body">
-        <div class="filter-section two-cols">
-          <div>
-            <h3>Status oferty</h3>
-            <select id="statusFilter" class="filter-select">
-              <option value="active">Tylko aktywne</option>
-              <option value="all">Aktywne + archiwalne</option>
-              <option value="archived">Tylko archiwalne</option>
-            </select>
-          </div>
-          <div>
-            <h3>Data dodania</h3>
-            <select id="ageFilter" class="filter-select">
-              <option value="7">Ostatnie 7 dni</option>
-              <option value="30" selected>Ostatnie 30 dni</option>
-              <option value="90">Ostatnie 90 dni</option>
-              <option value="all">Dowolna data</option>
-              <option value="unknown">Data nieustalona</option>
-            </select>
-          </div>
-        </div>
-        <div class="filter-section"><h3>Rodzaj</h3><div id="categoryFilters" class="check-grid"></div></div>
-        <div class="filter-section"><h3>Typ działki</h3><div id="typeFilters" class="check-grid"></div></div>
-        <div class="filter-section"><h3>Plan / możliwość zabudowy</h3><div id="planningFilters" class="check-grid"></div></div>
-        <div class="filter-section"><h3>Miejscowość</h3><div id="localityFilters" class="check-grid"></div></div>
-        <div class="filter-section"><h3>Portal / źródło</h3><div id="sourceFilters" class="check-grid"></div></div>
-        <div class="filter-section two-cols">
-          <div><h3>Powierzchnia od</h3><input id="minArea" type="number" min="0" placeholder="np. 1500" /></div>
-          <div><h3>Powierzchnia do</h3><input id="maxArea" type="number" min="0" placeholder="bez limitu" /></div>
-          <div><h3>Cena do</h3><input id="maxPrice" type="number" min="0" placeholder="np. 250000" /></div>
-          <div><h3>zł/m² do</h3><input id="maxPpm" type="number" min="0" step="0.01" placeholder="np. 60" /></div>
-          <div><h3>Maks. różnica vs RCN</h3><input id="maxRcnPremium" type="number" step="1" placeholder="np. 10" /></div>
-          <div class="filter-help">Np. <b>-10</b> pokaże oferty co najmniej 10% poniżej mediany RCN.</div>
-        </div>
-        <div class="filter-section">
-          <label class="toggle-row"><input id="onlyPhone" type="checkbox"/><span>Tylko z telefonem</span></label>
-          <label class="toggle-row"><input id="onlyParcel" type="checkbox"/><span>Tylko z numerem działki</span></label>
-          <label class="toggle-row"><input id="onlyPriceChanges" type="checkbox"/><span>Tylko ze zmianą ceny</span></label>
-        </div>
+        <div class="filter-grid"><label>Status<select id="statusFilter"><option value="active">Aktywne</option><option value="all">Aktywne + archiwalne</option><option value="archived">Archiwalne</option></select></label><label>Data dodania<select id="ageFilter"><option value="7">7 dni</option><option value="30" selected>30 dni</option><option value="90">90 dni</option><option value="all">Dowolna</option><option value="unknown">Nieustalona</option></select></label></div>
+        <div class="filter-block"><h3>Typ działki</h3><div id="typeFilters" class="check-grid"></div></div>
+        <div class="filter-block"><h3>Plan / zabudowa</h3><div id="planningFilters" class="check-grid"></div></div>
+        <div class="filter-block"><h3>Miejscowość</h3><div id="localityFilters" class="check-grid"></div></div>
+        <div class="filter-block"><h3>Portal</h3><div id="sourceFilters" class="check-grid"></div></div>
+        <div class="filter-grid"><label>Powierzchnia od<input id="minArea" type="number" min="0" placeholder="1500"/></label><label>Powierzchnia do<input id="maxArea" type="number" min="0" placeholder="bez limitu"/></label><label>Cena do<input id="maxPrice" type="number" min="0" placeholder="250000"/></label><label>zł/m² do<input id="maxPpm" type="number" min="0" step="0.01" placeholder="60"/></label></div>
+        <div class="filter-block toggles"><label><input id="onlyPhone" type="checkbox"/><span>Tylko z telefonem</span></label><label><input id="onlyParcel" type="checkbox"/><span>Tylko z numerem działki</span></label><label><input id="onlyPriceChanges" type="checkbox"/><span>Tylko ze zmianą ceny</span></label></div>
       </div>
-      <div class="drawer-foot"><button id="clearFilters" class="ghost">Reset</button><button id="applyFilters" class="primary">Pokaż wyniki</button></div>
+      <div class="drawer-foot"><button id="clearFilters" class="btn soft">Reset</button><button id="applyFilters" class="btn primary">Pokaż wyniki</button></div>
     </aside>
     <div id="backdrop" class="backdrop hidden"></div>
 
-    <dialog id="detailDialog" class="detail-dialog">
-      <button id="detailClose" class="detail-close">×</button>
-      <div id="detailBody"></div>
-    </dialog>
-
+    <dialog id="detailDialog" class="detail-dialog"><div class="sheet-handle"></div><button id="detailClose" class="detail-close">×</button><div id="detailBody"></div></dialog>
+    <dialog id="rejectDialog" class="confirm-dialog"><div><div class="warn-icon">!</div><h3>Usunąć tę ofertę?</h3><p>Zniknie z D1 i trafi na blacklistę. Kolejny skan nie doda jej ponownie.</p><div class="confirm-actions"><button id="rejectCancel" class="btn soft">Anuluj</button><button id="rejectConfirm" class="btn danger solid">Usuń i zablokuj</button></div></div></dialog>
     <div id="toast" class="toast"></div>
   </div>
-
-  <script type="module" src="/app.js?v=147"></script>
+  <script type="module" src="/app.js?v=1483"></script>
 </body>
 </html>

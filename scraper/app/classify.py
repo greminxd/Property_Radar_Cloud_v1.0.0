@@ -30,6 +30,11 @@ def classify_category(title: str, url: str, text: str, category_hint: str | None
     """
     t=asciifold(title or '')
     u=asciifold(url or '')
+    # OLX exposes the category in public advert URLs. Any explicit non-real-estate
+    # category is a hard reject even if a caller supplied a stale plot hint.
+    cid=olx_url_cid(url)
+    if 'olx.pl' in u and cid is not None and cid != 3:
+        return 'other'
     if any(k in t for k in ["garaz", "miejsce postojowe", "parking", "boks garazowy"]):
         return "other"
     if any(k in u for k in ["/garaz", "/garaze", "garaz-na-sprzedaz", "garaze-parkingi"]):

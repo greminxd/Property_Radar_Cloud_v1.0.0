@@ -12,9 +12,7 @@ LISTING_COLUMNS = [
     'published_text','published_at','updated_text','updated_at','source_status','archive_reason',
     'area_warning','image_url','location_confidence','area_locality','area_confidence',
     'privacy_score','privacy_reasons','deal_label','median_comparable','market_mean_comparable','comparable_count',
-    'comparison_quality','rcn_median_ppm','rcn_mean_ppm','rcn_count','rcn_radius_km','rcn_months',
-    'rcn_last_date','rcn_last_ppm','rcn_quality','rcn_history_count','rcn_history_last_date',
-    'rcn_history_last_price','rcn_history_last_ppm','rcn_history_match','description'
+    'comparison_quality','description'
 ]
 
 class CloudDB:
@@ -168,6 +166,9 @@ class CloudDB:
         return {r['canonical_url']:r for r in self.query('SELECT id,canonical_url,price,price_alert_reference,active,source_status,published_at FROM listings')}
 
     def upsert_many(self,records):
+        blocked=self.blacklist_map()
+        records=[r for r in (records or []) if r.get('canonical_url') and r.get('canonical_url') not in blocked]
+        if not records:return []
         now=self.now(); old=self.existing_map(); changes=[]; stmts=[]
         update_cols=[c for c in LISTING_COLUMNS if c!='canonical_url']
         placeholders=','.join('?' for _ in LISTING_COLUMNS)
@@ -221,32 +222,27 @@ class CloudDB:
     def update_scores(self,rows):
         stmts=[]
         for r in rows:
-            stmts.append(("""UPDATE listings SET privacy_score=NULL,privacy_reasons='',deal_label=?,median_comparable=?,market_mean_comparable=?,comparable_count=?,comparison_quality=?,
-                rcn_median_ppm=?,rcn_mean_ppm=?,rcn_count=?,rcn_radius_km=?,rcn_months=?,rcn_last_date=?,rcn_last_ppm=?,rcn_quality=?,
-                rcn_history_count=?,rcn_history_last_date=?,rcn_history_last_price=?,rcn_history_last_ppm=?,rcn_history_match=? WHERE id=?""",[
-                r.get('deal_label'),r.get('median_comparable'),r.get('market_mean_comparable'),r.get('comparable_count',0),r.get('comparison_quality'),
-                r.get('rcn_median_ppm'),r.get('rcn_mean_ppm'),r.get('rcn_count',0),r.get('rcn_radius_km'),r.get('rcn_months'),
-                r.get('rcn_last_date'),r.get('rcn_last_ppm'),r.get('rcn_quality'),
-                r.get('rcn_history_count',0),r.get('rcn_history_last_date'),r.get('rcn_history_last_price'),r.get('rcn_history_last_ppm'),r.get('rcn_history_match'),r['id']]))
+            stmts.append(("""UPDATE listings SET privacy_score=NULL,privacy_reasons='',deal_label=?,median_comparable=?,market_mean_comparable=?,comparable_count=?,comparison_quality=? WHERE id=?""",[
+                r.get('deal_label'),r.get('median_comparable'),r.get('market_mean_comparable'),r.get('comparable_count',0),r.get('comparison_quality'),r['id']]))
         self.batch(stmts)
 
-    def upsert_rcn_transactions(self,rows):
-        if not rows: return
-        now=self.now(); stmts=[]
-        sql='''INSERT INTO rcn_transactions(tx_key,transaction_date,price,area_m2,price_m2,parcel_number,parcel_id,transaction_id,price_basis,mpzp,use_type,address,lat,lon,fetched_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(tx_key) DO UPDATE SET transaction_date=excluded.transaction_date,price=excluded.price,area_m2=excluded.area_m2,price_m2=excluded.price_m2,parcel_number=excluded.parcel_number,parcel_id=excluded.parcel_id,transaction_id=excluded.transaction_id,price_basis=excluded.price_basis,mpzp=excluded.mpzp,use_type=excluded.use_type,address=excluded.address,lat=excluded.lat,lon=excluded.lon,fetched_at=excluded.fetched_at'''
-        for r in rows:
-            stmts.append((sql,[r.get('tx_key'),r.get('transaction_date'),r.get('price'),r.get('area_m2'),r.get('price_m2'),r.get('parcel_number'),r.get('parcel_id'),r.get('transaction_id'),r.get('price_basis'),r.get('mpzp'),r.get('use_type'),r.get('address'),r.get('lat'),r.get('lon'),now]))
-        self.batch(stmts)
+    def blacklist_map(self):
+        try:return {str(r.get('canonical_url') or ''):r for r in self.query('SELECT canonical_url,reason FROM listing_blacklist') if r.get('canonical_url')}
+        except Exception:return {}
 
-    def purge_old_rcn(self,cutoff_iso): self.execute('DELETE FROM rcn_transactions WHERE transaction_date IS NOT NULL AND transaction_date < ?',[cutoff_iso])
+    def blocked_urls(self):
+        return set(self.blacklist_map().keys())
 
-    def get_rcn_recent(self,cutoff_iso=None):
-        if cutoff_iso:
-            return self.query('SELECT * FROM rcn_transactions WHERE transaction_date IS NOT NULL AND transaction_date>=? ORDER BY transaction_date DESC',[cutoff_iso])
-        return self.query('SELECT * FROM rcn_transactions ORDER BY transaction_date DESC')
+    def blacklist_url(self,url,reason='manual-invalid',source=None,title=None):
+        if not url:return
+        self.execute('''INSERT INTO listing_blacklist(canonical_url,reason,source,title,created_at)
+            VALUES(?,?,?,?,?) ON CONFLICT(canonical_url) DO UPDATE SET reason=excluded.reason,
+            source=COALESCE(excluded.source,listing_blacklist.source),title=COALESCE(excluded.title,listing_blacklist.title),created_at=excluded.created_at''',
+            [url,reason,source,title,self.now()])
+        self.delete_urls([url])
 
+    def block_url(self,url,reason='manual-invalid'):
+        self.blacklist_url(url,reason)
 
     def parcel_cache_get(self,key):
         rows=self.query('SELECT * FROM parcel_lookup_cache WHERE lookup_key=?',[key]); return rows[0] if rows else None

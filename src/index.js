@@ -173,14 +173,6 @@ function ppm(v) {
   return `${Number(v).toFixed(2).replace('.', ',')} zł/m²`;
 }
 
-function trustedRcn(r) {
-  const med=Number(r?.rcn_median_ppm), n=Number(r?.rcn_count||0);
-  const q=String(r?.rcn_quality||'').toLowerCase();
-  const last=r?.rcn_last_date?new Date(r.rcn_last_date).getTime():null;
-  const dateOk=last==null || (Number.isFinite(last) && last<=Date.now()+86400000);
-  return Number.isFinite(med) && med>=0.5 && med<=3000 && n>=3 && dateOk && !q.startsWith('brak') && !q.startsWith('za mało');
-}
-
 function sizeBadge(v) {
   v = Number(v || 0);
   if (v >= 10000) return '👑 1 HA+';
@@ -203,16 +195,8 @@ function listingText(r, mode = 'new') {
   else lines.push(`🗓 Data dodania: <b>nieustalona</b>`);
   if (r.plot_type) lines.push(`🏷 ${escapeHtml(r.plot_type)} • 🏗 ${escapeHtml(r.planning_status || 'nieustalone')}`);
   if (r.median_comparable) lines.push(`📢 Ogłoszenia: mediana <b>${ppm(r.median_comparable)}</b> • średnia ${ppm(r.market_mean_comparable)} (${r.comparable_count || 0})`);
-  if (trustedRcn(r)) {
-    lines.push(`🏛 RCN ${r.rcn_months || 24} mies.: mediana <b>${ppm(r.rcn_median_ppm)}</b> • średnia ${ppm(r.rcn_mean_ppm)} (${r.rcn_count || 0} trans., ≤${r.rcn_radius_km || '?'} km)`);
-    if (r.rcn_last_date) lines.push(`🧾 Ostatnia transakcja: ${plDateOnly(r.rcn_last_date)} • ${ppm(r.rcn_last_ppm)}`);
-  }
   if (r.phone) lines.push(`☎️ <b>${escapeHtml(r.phone)}</b>`);
   if (r.parcel_number) lines.push(`🗺 Nr działki: <b>${escapeHtml(r.parcel_number)}</b>`);
-  if (Number(r.rcn_history_count||0)>0 && r.rcn_history_last_date) {
-    const basis=String(r.rcn_history_match||'').includes('property-level')?'cena całej nieruchomości obejmującej działkę':'cena tej działki wg RCN';
-    lines.push(`🧾 Historia RCN: <b>${plDateOnly(r.rcn_history_last_date)}</b> • ${money(r.rcn_history_last_price)} • ${ppm(r.rcn_history_last_ppm)} (${escapeHtml(basis)})`);
-  }
   lines.push(`🌐 <b>${escapeHtml(r.source || '?')}</b>`);
   return lines.join('\n');
 }
@@ -255,7 +239,6 @@ async function systemState(env) {
 }
 
 async function databaseStats(env) {
-  // One D1 batch instead of many serial round-trips. This matters for Telegram latency.
   const batch = await env.DB.batch([
     env.DB.prepare(`SELECT
       COUNT(*) total_rows,
@@ -268,63 +251,17 @@ async function databaseStats(env) {
       SUM(CASE WHEN active=1 AND category='plot' AND published_at IS NULL THEN 1 ELSE 0 END) unknown_date,
       SUM(CASE WHEN active=1 AND category='plot' AND phone IS NOT NULL AND phone<>'' THEN 1 ELSE 0 END) with_phone
     FROM listings`),
-    env.DB.prepare(`SELECT AVG(price_m2) avg_ppm, MIN(price_m2) min_ppm, MAX(price_m2) max_ppm
-      FROM listings WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 5000`),
-    env.DB.prepare(`SELECT price_m2 FROM listings
-      WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 5000 ORDER BY price_m2`),
-    env.DB.prepare(`SELECT AVG(price_m2) avg_rcn, COUNT(*) rcn_count, MAX(transaction_date) rcn_last_date
-      FROM rcn_transactions WHERE price_m2 BETWEEN 0.5 AND 3000
-      AND julianday(transaction_date)>=julianday('now','-24 months') AND julianday(transaction_date)<=julianday('now','+1 day')`),
-    env.DB.prepare(`SELECT price_m2 rcn_last_ppm, transaction_date, parcel_number FROM rcn_transactions
-      WHERE price_m2 BETWEEN 0.5 AND 3000
-      AND julianday(transaction_date)>=julianday('now','-24 months') AND julianday(transaction_date)<=julianday('now','+1 day')
-      ORDER BY transaction_date DESC LIMIT 1`),
-    env.DB.prepare(`SELECT price_m2 FROM rcn_transactions
-      WHERE price_m2 BETWEEN 0.5 AND 3000
-      AND julianday(transaction_date)>=julianday('now','-24 months') AND julianday(transaction_date)<=julianday('now','+1 day') ORDER BY price_m2`),
-    env.DB.prepare(`SELECT COALESCE(NULLIF(area_locality,''),NULLIF(location,''),'?') name, COUNT(*) n
-      FROM listings WHERE active=1 AND category='plot' GROUP BY name ORDER BY n DESC LIMIT 20`),
+    env.DB.prepare(`SELECT AVG(price_m2) avg_ppm, MIN(price_m2) min_ppm, MAX(price_m2) max_ppm FROM listings WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 5000`),
+    env.DB.prepare(`SELECT price_m2 FROM listings WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 5000 ORDER BY price_m2`),
+    env.DB.prepare(`SELECT COALESCE(NULLIF(area_locality,''),NULLIF(location,''),'?') name, COUNT(*) n FROM listings WHERE active=1 AND category='plot' GROUP BY name ORDER BY n DESC LIMIT 20`),
     env.DB.prepare(`SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1`),
-    env.DB.prepare(`SELECT COUNT(*) rcn_history_rows,
-      COUNT(DISTINCT CASE WHEN parcel_id IS NOT NULL AND parcel_id<>'' THEN parcel_id END) rcn_identified_parcels
-      FROM rcn_transactions WHERE julianday(transaction_date)>=julianday('now','-120 months') AND julianday(transaction_date)<=julianday('now','+1 day')`),
+    env.DB.prepare(`SELECT COUNT(*) blocked FROM listing_blacklist`),
   ]);
-
-  const first = (r) => (r?.results || [])[0] || {};
-  const rows = (r) => r?.results || [];
-  const total = first(batch[0]), price = first(batch[1]);
-  const vals = rows(batch[2]).map(x=>Number(x.price_m2)).filter(Number.isFinite);
-  let med = null;
-  if (vals.length) { const m=Math.floor(vals.length/2); med=vals.length%2?vals[m]:(vals[m-1]+vals[m])/2; }
-
-  const rcn = first(batch[3]), rcnLast = first(batch[4]);
-  const rv = rows(batch[5]).map(x=>Number(x.price_m2)).filter(Number.isFinite);
-  let rmed = null;
-  if (rv.length) { const m=Math.floor(rv.length/2); rmed=rv.length%2?rv[m]:(rv[m-1]+rv[m])/2; }
-
-  return {
-    total_rows:Number(total.total_rows||0),
-    active_rows:Number(total.active_rows||0),
-    plots:Number(total.plots||0),
-    active_nonplots:Number(total.active_nonplots||0),
-    archived:Number(total.archived||0),
-    published30:Number(total.published30||0),
-    published7:Number(total.published7||0),
-    unknown_date:Number(total.unknown_date||0),
-    with_phone:Number(total.with_phone||0),
-    ...price,
-    median_ppm:med,
-    rcn_median_ppm:rmed,
-    rcn_mean_ppm:rcn?.avg_rcn||null,
-    rcn_count:Number(rcn?.rcn_count||0),
-    rcn_last_date:rcn?.rcn_last_date||null,
-    rcn_last_ppm:rcnLast?.rcn_last_ppm||null,
-    rcn_last_parcel:rcnLast?.parcel_number||null,
-    localities:rows(batch[6]),
-    last_scan:first(batch[7]),
-    rcn_history_rows:Number(first(batch[8]).rcn_history_rows||0),
-    rcn_identified_parcels:Number(first(batch[8]).rcn_identified_parcels||0),
-  };
+  const first=(r)=>(r?.results||[])[0]||{}, rows=(r)=>r?.results||[];
+  const total=first(batch[0]), price=first(batch[1]);
+  const vals=rows(batch[2]).map(x=>Number(x.price_m2)).filter(Number.isFinite);
+  let med=null;if(vals.length){const m=Math.floor(vals.length/2);med=vals.length%2?vals[m]:(vals[m-1]+vals[m])/2;}
+  return {total_rows:Number(total.total_rows||0),active_rows:Number(total.active_rows||0),plots:Number(total.plots||0),active_nonplots:Number(total.active_nonplots||0),archived:Number(total.archived||0),published30:Number(total.published30||0),published7:Number(total.published7||0),unknown_date:Number(total.unknown_date||0),with_phone:Number(total.with_phone||0),...price,median_ppm:med,localities:rows(batch[3]),last_scan:first(batch[4]),blocked_urls:Number(first(batch[5]).blocked||0)};
 }
 
 function parseDiag(last) {
@@ -400,7 +337,6 @@ function statusLongText(s) {
   const bad=(s.diagnostics||[]).filter(x=>!x.healthy),good=(s.diagnostics||[]).filter(x=>x.healthy);
   const sourceLines=(s.diagnostics||[]).map(x=>`${x.healthy?'✅':'⚠️'} ${escapeHtml(x.source||'?')}: rekordy ${x.records??0}, linki ${x.discovered_links??0}, detail ${x.detail_pages_ok??0}${x.blocked?` • blokady ${x.blocked}`:''}${x.fatal?` • ${escapeHtml(x.fatal)}`:''}`);
   let locValidation={}; try{locValidation=JSON.parse(s.system?.location_validation?.value||'{}')||{};}catch{}
-  let rcnState={}; try{rcnState=JSON.parse(s.system?.rcn_status?.value||'{}')||{};}catch{}
   let dbMaintenance={}; try{dbMaintenance=JSON.parse(s.system?.db_maintenance_last?.value||'{}')||{};}catch{}
   const locReasons=Object.entries(locValidation.reasons||{}).sort((a,b)=>Number(b[1])-Number(a[1])).slice(0,4).map(([k,v])=>`${escapeHtml(k)} ${v}`).join(' • ');
   return [`📋 <b>PEŁNY STATUS PROPERTY RADAR</b>`,``,
@@ -416,82 +352,18 @@ function statusLongText(s) {
     `🚫 Odrzucone ${s.last_scan?.rejected_count??'—'} • wygaszone ${s.last_scan?.deactivated_count??'—'}`,
     locValidation.registry_version?`🧭 Walidacja lokalizacji: <b>${escapeHtml(locValidation.registry_version)}</b>${locReasons?` • ${locReasons}`:''}`:'',
     dbMaintenance.version?`🧹 Auto-porządki D1: sprawdzono ${dbMaintenance.checked_rows||0} • usunięto <b>${dbMaintenance.deleted_rows||0}</b>`:'',
-    rcnState.state?`🏛 RCN: <b>${escapeHtml(rcnState.state)}</b>${rcnState.fetched!=null?` • pobrano ${rcnState.fetched}`:''}${rcnState.history_months?` • historia ${rcnState.history_months} mies.`:''}${rcnState.error?` • ${escapeHtml(rcnState.error)}`:''}`:'',
     ``,`⏰ Następny automatyczny: <b>${s.next_scan}</b>`,`🧯 Ostatni błąd: ${escapeHtml(s.system?.last_error?.value||'brak')}`].filter(Boolean).join('\n');
 }
 
 function databaseStatusText(s) {
   const loc=(s.localities||[]).map(x=>`${escapeHtml(x.name)}: <b>${x.n}</b>`).join(' • ')||'—';
-  const legacy = Number(s.active_nonplots||0);
-  return [`🗃 <b>STATUS BAZY</b>`,
-    `📦 Wszystkie rekordy: <b>${s.total_rows||0}</b> • aktywne: <b>${s.active_rows||0}</b>`,
-    `🏡 Aktywne działki: <b>${s.plots||0}</b>${legacy?` • poza nowym filtrem działek: ${legacy}`:''}`,
-    `🕘 Dodane ≤7 dni: ${s.published7||0} • ≤30 dni: <b>${s.published30||0}</b>`,
-    `❓ Aktywne działki bez daty publikacji: ${s.unknown_date||0} • archiwalne/nieaktywne: ${s.archived||0}`,
-    `☎️ Z telefonem: ${s.with_phone||0}`,
-    ``,
-    `📢 <b>CENY Z OGŁOSZEŃ</b>`,
-    `mediana: <b>${s.median_ppm==null?'—':ppm(s.median_ppm)}</b> • średnia: ${s.avg_ppm==null?'—':ppm(s.avg_ppm)}`,
-    ``,
-    `🏛 <b>REALNE TRANSAKCJE RCN — 24 mies.</b>`,
-    `mediana: <b>${s.rcn_median_ppm==null?'—':ppm(s.rcn_median_ppm)}</b> • średnia: ${s.rcn_mean_ppm==null?'—':ppm(s.rcn_mean_ppm)}`,
-    `transakcje benchmarkowe: ${s.rcn_count||0} • ostatnia: ${plDateOnly(s.rcn_last_date)}${s.rcn_last_ppm?` • ${ppm(s.rcn_last_ppm)}`:''}`,
-    `archiwum RCN do historii działek: ${s.rcn_history_rows||0} rekordów • działki z ID EGiB: ${s.rcn_identified_parcels||0}`,
-    ``,
-    `📍 <b>AKTYWNE WG MIEJSCOWOŚCI</b>`,loc].join('\n');
+  const legacy=Number(s.active_nonplots||0);
+  return [`🗃 <b>STATUS BAZY</b>`,`📦 Wszystkie rekordy: <b>${s.total_rows||0}</b> • aktywne: <b>${s.active_rows||0}</b>`,`🏡 Aktywne działki: <b>${s.plots||0}</b>${legacy?` • poza filtrem: ${legacy}`:''}`,`🕘 Dodane ≤7 dni: ${s.published7||0} • ≤30 dni: <b>${s.published30||0}</b>`,`❓ Bez daty: ${s.unknown_date||0} • archiwalne/nieaktywne: ${s.archived||0}`,`☎️ Z telefonem: ${s.with_phone||0} • 🚫 zablokowane URL: ${s.blocked_urls||0}`,``,`📢 <b>CENY Z OGŁOSZEŃ / m²</b>`,`mediana: <b>${s.median_ppm==null?'—':ppm(s.median_ppm)}</b> • średnia: ${s.avg_ppm==null?'—':ppm(s.avg_ppm)}`,``,`📍 <b>AKTYWNE WG MIEJSCOWOŚCI</b>`,loc].join('\n');
 }
 
 async function listForBot(env, mode) {
   if(mode==='price') return (await env.DB.prepare(`SELECT * FROM listings WHERE active=1 AND category='plot' AND COALESCE(source_status,'active')<>'archived' AND last_meaningful_price_change_at IS NOT NULL AND julianday(last_meaningful_price_change_at)>=julianday('now','-30 days') ORDER BY last_meaningful_price_change_at DESC LIMIT 6`).all()).results||[];
   return (await env.DB.prepare(`SELECT * FROM listings WHERE active=1 AND category='plot' AND published_at IS NOT NULL AND julianday(published_at)>=julianday('now','-3 day') ORDER BY published_at DESC LIMIT 6`).all()).results||[];
-}
-
-function haversineKm(lat1,lon1,lat2,lon2){
-  const R=6371.0088,toRad=x=>Number(x)*Math.PI/180;
-  const p1=toRad(lat1),p2=toRad(lat2),dp=toRad(Number(lat2)-Number(lat1)),dl=toRad(Number(lon2)-Number(lon1));
-  const a=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;return 2*R*Math.asin(Math.sqrt(a));
-}
-
-async function nearbyRcn(env,listing){
-  if(!listing?.lat||!listing?.lon)return [];
-  const rows=(await env.DB.prepare(`SELECT transaction_date,price,area_m2,price_m2,parcel_number,parcel_id,transaction_id,price_basis,mpzp,use_type,address,lat,lon FROM rcn_transactions WHERE lat IS NOT NULL AND lon IS NOT NULL AND price_m2 BETWEEN 0.5 AND 3000 AND julianday(transaction_date)>=julianday('now','-24 months') AND julianday(transaction_date)<=julianday('now','+1 day') ORDER BY transaction_date DESC LIMIT 2500`).all()).results||[];
-  const targetArea=Number(listing.area_m2||0),limitRadius=Number(listing.rcn_radius_km||10);
-  const filtered=rows.map(t=>({...t,distance_km:haversineKm(listing.lat,listing.lon,t.lat,t.lon)})).filter(t=>{
-    if(t.distance_km>limitRadius)return false;
-    if(targetArea&&t.area_m2){const ratio=Number(t.area_m2)/targetArea;if(ratio<0.5||ratio>2)return false;}
-    return true;
-  }).sort((a,b)=>new Date(b.transaction_date||0)-new Date(a.transaction_date||0));
-  // Whole-property RCN transactions can be exposed once for each member parcel.
-  // Show/count them only once in nearby comparables.
-  const seen=new Set(),unique=[];
-  for(const t of filtered){
-    const k=String(t.price_basis||'')==='property'?(t.transaction_id||`${t.transaction_date}|${t.price}|${t.area_m2}`):(`parcel|${t.transaction_id||''}|${t.parcel_id||t.parcel_number||''}|${t.transaction_date}|${t.price}`);
-    if(seen.has(k))continue;seen.add(k);unique.push(t);
-  }
-  return unique.slice(0,8);
-}
-
-function normParcel(v){const m=String(v||'').replace(/\s+/g,'').match(/(\d{1,7}(?:\/\d{1,7})?)/);return m?m[1]:'';}
-function foldLoc(v){return String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ł/g,'l');}
-
-async function parcelHistoryRcn(env,listing){
-  const pid=String(listing?.parcel_id||'').trim(),pn=normParcel(listing?.parcel_number);
-  if(!pid&&!pn)return [];
-  let rows=[];
-  if(pid){
-    rows=(await env.DB.prepare(`SELECT transaction_date,price,area_m2,price_m2,parcel_number,parcel_id,transaction_id,price_basis,mpzp,use_type,address,lat,lon
-      FROM rcn_transactions WHERE parcel_id=? AND julianday(transaction_date)>=julianday('now','-120 months') AND julianday(transaction_date)<=julianday('now','+1 day') ORDER BY transaction_date DESC LIMIT 40`).bind(pid).all()).results||[];
-    return rows.map(t=>({...t,history_match:String(t.price_basis||'')==='parcel'?'egib-id-exact':'egib-id-property-level'}));
-  }
-  rows=(await env.DB.prepare(`SELECT transaction_date,price,area_m2,price_m2,parcel_number,parcel_id,transaction_id,price_basis,mpzp,use_type,address,lat,lon
-    FROM rcn_transactions WHERE parcel_number=? AND julianday(transaction_date)>=julianday('now','-120 months') AND julianday(transaction_date)<=julianday('now','+1 day') ORDER BY transaction_date DESC LIMIT 100`).bind(pn).all()).results||[];
-  const loc=foldLoc(listing.area_locality||listing.location),targetArea=Number(listing.area_m2||0);
-  return rows.filter(t=>{
-    if(normParcel(t.parcel_number)!==pn)return false;
-    const addr=foldLoc(t.address),locOk=!!(loc&&addr&&addr.includes(loc));
-    let areaOk=false;if(targetArea&&t.area_m2){const ratio=Number(t.area_m2)/targetArea;areaOk=ratio>=0.70&&ratio<=1.35;}
-    return locOk&&areaOk;
-  }).map(t=>({...t,history_match:'parcel-number+locality+area'})).slice(0,20);
 }
 
 async function dispatchScan(env) {
@@ -729,7 +601,7 @@ async function handleApi(req, env, url) {
   if (url.pathname === '/api/listings') {
     // Mini App is plots-only. Legacy houses/garages can remain in D1 for audit/history,
     // but they are never returned to the user-facing listing browser.
-    const rows = await env.DB.prepare(`SELECT * FROM listings WHERE category='plot' AND COALESCE(source_status,'active')<>'invalid-parser' ORDER BY COALESCE(published_at,first_seen) DESC, id DESC LIMIT 2500`).all();
+    const rows = await env.DB.prepare(`SELECT * FROM listings WHERE category='plot' AND COALESCE(source_status,'active')<>'invalid-parser' AND NOT EXISTS (SELECT 1 FROM listing_blacklist b WHERE b.canonical_url=listings.canonical_url) ORDER BY COALESCE(published_at,first_seen) DESC, id DESC LIMIT 2500`).all();
     return json({ listings: rows.results || [], stats: await databaseStats(env) },200,{'Cache-Control':'no-store, no-cache, must-revalidate'});
   }
 
@@ -738,12 +610,24 @@ async function handleApi(req, env, url) {
     const rows = await env.DB.prepare(`SELECT seen_at, price FROM price_history WHERE listing_id=? ORDER BY seen_at ASC`).bind(Number(m[1])).all();
     return json({ history: rows.results || [] });
   }
-  const mr = url.pathname.match(/^\/api\/listing\/(\d+)\/rcn$/);
-  if (mr) {
-    const listing=await env.DB.prepare(`SELECT id,lat,lon,area_m2,area_locality,location,parcel_number,parcel_id,parcel_id_confidence,rcn_radius_km FROM listings WHERE id=?`).bind(Number(mr[1])).first();
+
+  const rejectMatch = url.pathname.match(/^\/api\/listing\/(\d+)\/reject$/);
+  if (rejectMatch && req.method === 'POST') {
+    if (user.role !== 'admin' && user.uid !== 'web') return json({ error:'admin required' },403);
+    const id=Number(rejectMatch[1]);
+    const listing=await env.DB.prepare(`SELECT id,canonical_url,source,title FROM listings WHERE id=?`).bind(id).first();
     if(!listing)return json({error:'listing not found'},404);
-    const [transactions,parcel_history]=await Promise.all([nearbyRcn(env,listing),parcelHistoryRcn(env,listing)]);
-    return json({transactions,parcel_history});
+    const body=await req.json().catch(()=>({}));
+    const reason=String(body.reason||'manual-invalid').slice(0,120);
+    const now=new Date().toISOString();
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO listing_blacklist(canonical_url,reason,source,title,created_at) VALUES(?,?,?,?,?)
+        ON CONFLICT(canonical_url) DO UPDATE SET reason=excluded.reason,source=excluded.source,title=excluded.title,created_at=excluded.created_at`)
+        .bind(listing.canonical_url,reason,listing.source,listing.title,now),
+      env.DB.prepare(`DELETE FROM price_history WHERE listing_id=?`).bind(id),
+      env.DB.prepare(`DELETE FROM listings WHERE id=?`).bind(id),
+    ]);
+    return json({ok:true,blocked_url:listing.canonical_url});
   }
 
   if (url.pathname === '/api/scan' && req.method === 'POST') {

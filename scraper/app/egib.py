@@ -68,7 +68,7 @@ class EGIBResolver:
     GUGiK's aggregate EGiB WFS supports parcel lookup by cadastral precinct/name and
     parcel number. We query number + municipality, then verify the precinct locally.
     The result gives us a stable ``id_dzialki`` and a real parcel centroid, which is
-    much safer for RCN history matching than a village-centre geocode.
+    safer for cadastral validation than a village-centre geocode.
     """
 
     def __init__(self, db, center):

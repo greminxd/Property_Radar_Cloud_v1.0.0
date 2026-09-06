@@ -42,19 +42,6 @@ CREATE TABLE IF NOT EXISTS listings (
   market_mean_comparable REAL,
   comparable_count INTEGER DEFAULT 0,
   comparison_quality TEXT,
-  rcn_median_ppm REAL,
-  rcn_mean_ppm REAL,
-  rcn_count INTEGER DEFAULT 0,
-  rcn_radius_km REAL,
-  rcn_months INTEGER,
-  rcn_last_date TEXT,
-  rcn_last_ppm REAL,
-  rcn_quality TEXT,
-  rcn_history_count INTEGER DEFAULT 0,
-  rcn_history_last_date TEXT,
-  rcn_history_last_price REAL,
-  rcn_history_last_ppm REAL,
-  rcn_history_match TEXT,
   price_alert_reference REAL,
   last_meaningful_price_change_at TEXT,
   last_price_old REAL,
@@ -71,22 +58,12 @@ CREATE TABLE IF NOT EXISTS price_history (
   FOREIGN KEY(listing_id) REFERENCES listings(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS rcn_transactions (
-  tx_key TEXT PRIMARY KEY,
-  transaction_date TEXT,
-  price REAL,
-  area_m2 REAL,
-  price_m2 REAL,
-  parcel_number TEXT,
-  parcel_id TEXT,
-  transaction_id TEXT,
-  price_basis TEXT,
-  mpzp TEXT,
-  use_type TEXT,
-  address TEXT,
-  lat REAL,
-  lon REAL,
-  fetched_at TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS listing_blacklist (
+  canonical_url TEXT PRIMARY KEY,
+  reason TEXT,
+  source TEXT,
+  title TEXT,
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS parcel_lookup_cache (
@@ -142,7 +119,3 @@ CREATE INDEX IF NOT EXISTS idx_listings_source_status ON listings(source_status)
 CREATE INDEX IF NOT EXISTS idx_listings_parcel_id ON listings(parcel_id);
 CREATE INDEX IF NOT EXISTS idx_price_history_listing ON price_history(listing_id, seen_at);
 CREATE INDEX IF NOT EXISTS idx_scan_runs_finished ON scan_runs(finished_at);
-CREATE INDEX IF NOT EXISTS idx_rcn_date ON rcn_transactions(transaction_date);
-CREATE INDEX IF NOT EXISTS idx_rcn_parcel ON rcn_transactions(parcel_number);
-CREATE INDEX IF NOT EXISTS idx_rcn_parcel_id ON rcn_transactions(parcel_id);
-CREATE INDEX IF NOT EXISTS idx_rcn_transaction ON rcn_transactions(transaction_id);

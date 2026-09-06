@@ -43,10 +43,7 @@ print(f'[OK] D1 tables/base schema: {len(table_stmts)} statements')
 # SQLite/D1 CREATE TABLE IF NOT EXISTS does not add new columns to an old table.
 required={
  'parcel_id':'TEXT','parcel_id_confidence':'TEXT','updated_text':'TEXT','updated_at':'TEXT','source_status':"TEXT DEFAULT 'active'",'archive_reason':'TEXT',
- 'market_mean_comparable':'REAL','rcn_median_ppm':'REAL','rcn_mean_ppm':'REAL','rcn_count':'INTEGER DEFAULT 0',
- 'rcn_radius_km':'REAL','rcn_months':'INTEGER','rcn_last_date':'TEXT','rcn_last_ppm':'REAL','rcn_quality':'TEXT',
- 'rcn_history_count':'INTEGER DEFAULT 0','rcn_history_last_date':'TEXT','rcn_history_last_price':'REAL','rcn_history_last_ppm':'REAL','rcn_history_match':'TEXT',
- 'price_alert_reference':'REAL','last_meaningful_price_change_at':'TEXT','last_price_old':'REAL','last_price_new':'REAL','last_price_change_pct':'REAL'
+ 'market_mean_comparable':'REAL','price_alert_reference':'REAL','last_meaningful_price_change_at':'TEXT','last_price_old':'REAL','last_price_new':'REAL','last_price_change_pct':'REAL'
 }
 cols={r['name'] for r in d1('PRAGMA table_info(listings)')}
 for name,typ in required.items():
@@ -54,19 +51,51 @@ for name,typ in required.items():
         d1(f'ALTER TABLE listings ADD COLUMN {name} {typ}')
         print('[MIGRATE] listings +',name)
 
-rcn_required={
- 'parcel_id':'TEXT','transaction_id':'TEXT','price_basis':'TEXT'
-}
-rcn_cols={r['name'] for r in d1('PRAGMA table_info(rcn_transactions)')}
-for name,typ in rcn_required.items():
-    if name not in rcn_cols:
-        d1(f'ALTER TABLE rcn_transactions ADD COLUMN {name} {typ}')
-        print('[MIGRATE] rcn_transactions +',name)
 
 if index_stmts:
     r=requests.post(url,headers=headers,json={'batch':[{'sql':s,'params':[]} for s in index_stmts]},timeout=90);r.raise_for_status();data=r.json()
     if not data.get('success'):raise SystemExit('D1 index init failed: '+json.dumps(data,ensure_ascii=False)[:2000])
 print(f'[OK] D1 indexes: {len(index_stmts)} statements')
+
+# RCN was removed from Property Radar v1.4.8. Remove its cache/state automatically.
+try:
+    d1('DROP TABLE IF EXISTS rcn_transactions')
+    d1("DELETE FROM system_state WHERE key IN ('rcn_status','rcn_parser_version')")
+    print('[OK] Legacy RCN cache removed')
+except Exception as e:
+    print(f'[WARN] Legacy RCN cleanup: {type(e).__name__}: {e}')
+
+# Old databases can still carry now-unused RCN columns on listings. Remove them
+# best-effort so the existing D1 schema is also market-only after this setup.
+def d1_soft(sql):
+    try:
+        rr=requests.post(url,headers=headers,json={'sql':sql,'params':[]},timeout=60)
+        data=rr.json() if rr.content else {}
+        return rr.ok and bool(data.get('success'))
+    except Exception:
+        return False
+
+legacy_cols=['rcn_median_ppm','rcn_mean_ppm','rcn_count','rcn_radius_km','rcn_months','rcn_last_date','rcn_last_ppm','rcn_quality','rcn_history_count','rcn_history_last_date','rcn_history_last_price','rcn_history_last_ppm','rcn_history_match']
+removed_cols=0
+for col in legacy_cols:
+    if col in {x['name'] for x in d1('PRAGMA table_info(listings)')}:
+        if d1_soft(f'ALTER TABLE listings DROP COLUMN {col}'):
+            removed_cols+=1
+print(f'[OK] Legacy RCN listing fields removed: {removed_cols}/{len(legacy_cols)}')
+
+KNOWN_BAD_URLS={
+    'https://www.olx.pl/d/oferta/dzialka-budowlana-20km-od-krakowa-CID3-ID1c8sfW.html':'wrong-zakliczyn-myslenice',
+    'https://www.olx.pl/d/oferta/powierzchnia-300m2-CID3-ID1c2K6x.html':'rental-wrong-zakliczyn',
+    'https://www.olx.pl/d/oferta/nowy-kolowrotek-samolla-ksn-8000-12-1-bb-karpiowy-surfcasting-1-sztuki-CID767-ID1ccuyw.html':'not-property',
+    'https://www.olx.pl/d/oferta/nowy-kolowrotek-samolla-ksn-8000-12-1-bb-karpiowy-surfcasting-3-sztuki-CID767-ID1ccupp.html':'not-property',
+}
+now=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+for bad_url,bad_reason in KNOWN_BAD_URLS.items():
+    d1('INSERT INTO listing_blacklist(canonical_url,reason,source,title,created_at) VALUES(?,?,?,?,?) ON CONFLICT(canonical_url) DO UPDATE SET reason=excluded.reason',[bad_url,bad_reason,'OLX',None,now])
+    ids=[int(x['id']) for x in d1('SELECT id FROM listings WHERE canonical_url=?',[bad_url])]
+    if ids:
+        qs=','.join('?' for _ in ids); d1(f'DELETE FROM price_history WHERE listing_id IN ({qs})',ids)
+    d1('DELETE FROM listings WHERE canonical_url=?',[bad_url])
 
 # Automatic one-time cleanup of legacy false positives. This is intentionally
 # conservative: only rows with hard textual/admin evidence of a foreign location
@@ -82,8 +111,8 @@ try:
     bad=[]; reasons={}
     for row in rows:
         why=None
-        if row.get('source')=='OLX':
-            why='olx-rebuild-v147'
+        if row.get('canonical_url') in KNOWN_BAD_URLS:
+            why=KNOWN_BAD_URLS[row.get('canonical_url')]
         elif is_rental_offer(row.get('title') or '',row.get('description') or '','',row.get('canonical_url') or ''):
             why='rental-offer'
         if why is None:
@@ -97,7 +126,7 @@ try:
         chunk=bad[i:i+40]; qs=','.join('?' for _ in chunk)
         d1(f'DELETE FROM price_history WHERE listing_id IN ({qs})',chunk)
         d1(f'DELETE FROM listings WHERE id IN ({qs})',chunk)
-    maintenance='1.4.7-purge-olx-rent-v1'
+    maintenance='1.4.8-blacklist-market-only-v3'
     now=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
     d1("INSERT INTO system_state(key,value,updated_at) VALUES('db_maintenance_version',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",[maintenance,now])
     d1("INSERT INTO system_state(key,value,updated_at) VALUES('db_maintenance_last',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",[json.dumps({'version':maintenance,'checked_rows':len(rows),'deleted_rows':len(bad),'reasons':reasons,'finished_at':now},ensure_ascii=False),now])

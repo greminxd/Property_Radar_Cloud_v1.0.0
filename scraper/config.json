@@ -136,7 +136,7 @@
       "parallel_details": 5,
       "detail_timeout_s": 18,
       "detail_budget_s": 105,
-      "source_timeout_s": 150,
+      "source_timeout_s": 210,
       "api_queries": [
         "Zdonia",
         "Zakliczyn",
@@ -154,7 +154,9 @@
       "http_retries": 3,
       "html_supplement": true,
       "html_search_pages": 1,
-      "fallback_detail_pages": 20
+      "fallback_detail_pages": 20,
+      "browser_session_fallback": true,
+      "browser_fallback_detail_pages": 15
     },
     {
       "name": "Morizon",
@@ -162,7 +164,9 @@
       "search_urls": [
         "https://www.morizon.pl/dzialki/tarnowski/zakliczyn/"
       ],
-      "detail_regex": "https?://(?:www\\.)?morizon\\.pl/oferta/[^?#]+"
+      "detail_regex": "https?://(?:www\\.)?morizon\\.pl/oferta/[^?#]+",
+      "prefer_http_discovery": true,
+      "prefer_http_details": true
     },
     {
       "name": "Gratka",
@@ -180,7 +184,9 @@
       "search_urls": [
         "https://zakliczyn.nieruchomosci-online.pl/dzialki,sprzedaz/"
       ],
-      "detail_regex": "https?://[^/]*nieruchomosci-online\\.pl/[^?#]*\\d+\\.html"
+      "detail_regex": "https?://[^/]*nieruchomosci-online\\.pl/[^?#]*\\d+\\.html",
+      "prefer_http_discovery": true,
+      "prefer_http_details": true
     },
     {
       "name": "Adresowo",
@@ -188,7 +194,13 @@
       "search_urls": [
         "https://adresowo.pl/dzialki/gmina-zakliczyn/"
       ],
-      "detail_regex": "https?://(?:www\\.)?adresowo\\.pl/o/[^?#]+"
+      "detail_regex": "https?://(?:www\\.)?adresowo\\.pl/o/[^?#]+",
+      "prefer_http_discovery": true,
+      "prefer_http_details": true,
+      "reveal_phone": false,
+      "parallel_details": 6,
+      "detail_timeout_s": 18,
+      "detail_budget_s": 110
     },
     {
       "name": "Domiporta",

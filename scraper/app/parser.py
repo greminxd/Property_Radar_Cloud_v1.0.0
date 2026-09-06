@@ -156,6 +156,16 @@ def _specific_locality(title: str, desc: str, structured_loc: str) -> tuple[str,
 
     if structured_loc:
         return clean_text(structured_loc), "structured-generic"
+
+    # Generic portal titles often expose an otherwise unknown village immediately
+    # before an explicit county, e.g. "… – Olcha, powiat żuromiński". Keep that
+    # locality instead of returning an empty value; area.py can then reject the
+    # foreign county deterministically.
+    m=re.search(r'(?:^|[-–—])\s*([A-ZŁŚŻŹĆŃÓĘĄ][A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż .-]{2,45}?)\s*,\s*powiat\b', title or '', re.I)
+    if m:
+        candidate=clean_text(m.group(1)).strip(' -–—,')
+        if candidate:
+            return candidate, "title-county"
     return "", "none"
 
 

@@ -119,6 +119,18 @@ class CloudDB:
             self.execute(f'DELETE FROM listings WHERE id IN ({qs})',chunk)
         return len(ids)
 
+    def deactivate_urls(self,urls,reason='outside-area'):
+        urls=[u for u in dict.fromkeys(urls or []) if u]
+        if not urls:return 0
+        changed=0
+        for i in range(0,len(urls),50):
+            chunk=urls[i:i+50]; qs=','.join('?' for _ in chunk)
+            before=self.query(f'SELECT COUNT(*) c FROM listings WHERE active=1 AND canonical_url IN ({qs})',chunk)
+            n=int(before[0]['c']) if before else 0
+            self.execute(f"UPDATE listings SET active=0,source_status=?,archive_reason=? WHERE canonical_url IN ({qs})",[reason,reason]+chunk)
+            changed+=n
+        return changed
+
     def count_scans_between(self,start_iso,end_iso):
         rows=self.query('SELECT COUNT(*) c FROM scan_runs WHERE finished_at>=? AND finished_at<?',[start_iso,end_iso])
         return int(rows[0]['c']) if rows else 0

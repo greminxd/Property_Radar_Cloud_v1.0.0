@@ -215,3 +215,19 @@ assert Scraper._olx_api_query_from_search_url('https://www.olx.pl/nieruchomosci/
 _nonplot=dict(_olx_offer,url='https://www.olx.pl/d/oferta/volkswagen-golf-zakliczyn-CID5-IDcar123.html',title='Volkswagen Golf Zakliczyn',description='Samochód osobowy, benzyna, 2018',params=[])
 assert not Scraper._olx_offer_is_plot(_nonplot),_nonplot
 print('SELFTEST OK v1.3.3 OLX public API')
+
+# v1.4.2: explicit foreign county/gmina must beat any later distance fallback.
+area_cfg=json.load(open('config.json',encoding='utf-8'))['area']
+outside={'location':'','title':'Na sprzedaż las o powierzchni 5,23 ha – Olcha, powiat żuromiński','description':''}
+ok,loc,why=area_accepts(outside,area_cfg,None)
+assert not ok and loc is None and why=='explicit-outside-county',(ok,loc,why)
+wrong_zak={'location':'Zakliczyn','title':'Działka Zakliczyn','description':'Zakliczyn, gmina Siepraw, powiat myślenicki'}
+ok,loc,why=area_accepts(wrong_zak,area_cfg,None)
+assert not ok and why.startswith('explicit-outside'),(ok,loc,why)
+right={'location':'','title':'Działka Lusławice 36 ar z WZ','description':''}
+ok,loc,why=area_accepts(right,area_cfg,None)
+assert ok and loc=='Lusławice',(ok,loc,why)
+foreign_html='<html><head><meta property="og:title" content="Na sprzedaż las o powierzchni 5,23 ha – Olcha, powiat żuromiński"></head><body><main><h1>Na sprzedaż las o powierzchni 5,23 ha – Olcha, powiat żuromiński</h1><p>Oferta</p></main></body></html>'
+foreign=parse_detail(foreign_html,'https://sprzedajemy.pl/test-nr123','Sprzedajemy','plot')
+assert foreign['location']=='Olcha' and foreign['location_confidence']=='title-county',foreign
+print('SELFTEST OK v1.4.2 strict location guard')

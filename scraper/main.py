@@ -18,7 +18,7 @@ from app.rcn import RCNClient, RCN_PARSER_VERSION
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
-LISTING_PARSER_VERSION='1.4.0-live-scan-v1'
+LISTING_PARSER_VERSION='1.4.2-location-olx-v2'
 
 def need(name):
     v=os.getenv(name,'').strip()
@@ -79,6 +79,24 @@ async def run():
     area_cfg=cfg['area']
     enabled=[x for x in cfg['sources'] if x.get('enabled',True)]
 
+    # Parser migration cleanup: immediately deactivate legacy rows that carry explicit
+    # evidence of a foreign county/municipality. This removes previously accepted
+    # false positives without waiting for the normal three-scan expiry window.
+    purged_outside_area=0
+    if parser_migration:
+        try:
+            existing=db.query("SELECT canonical_url,title,location,description FROM listings WHERE active=1")
+            bad=[]
+            for row in existing:
+                ok,_,why=area_accepts(row,area_cfg,None)
+                if (not ok) and why.startswith('explicit-outside'):
+                    bad.append(row.get('canonical_url'))
+            purged_outside_area=db.deactivate_urls(bad,'outside-area')
+            if purged_outside_area:
+                print(f'[BOOT] location migration: deactivated {purged_outside_area} explicit outside-area rows',flush=True)
+        except Exception as e:
+            print(f'[BOOT] location migration warning: {type(e).__name__}: {e}',flush=True)
+
     # Live state consumed by Mini App + Telegram. The scan still runs on GitHub Actions,
     # but the UI receives source-level progress from D1 every few seconds.
     progress={
@@ -127,20 +145,35 @@ async def run():
             fold=body.lower().replace('ł','l')
             if 'gmina siepraw' in fold or 'powiat myslenicki' in fold:
                 batch_rejected.append({'url':r.get('canonical_url'),'reason':'wrong Zakliczyn (Siepraw/Myślenice)'}); continue
-            coords=geocoder.from_jsonld(jsonld)
-            if not coords and r.get('location'):
-                loc=r['location'].strip(); query=(loc+', gmina Zakliczyn, powiat tarnowski') if loc.lower()=='zakliczyn' else (loc+', powiat tarnowski')
+            # Resolve the target area from listing text FIRST. In whitelist mode we
+            # deliberately do not let an arbitrary JSON-LD coordinate rescue an unknown
+            # locality: portals can embed geo for recommended offers and that caused
+            # far-away listings to appear 2 km from Bieśnik.
+            text_ok,text_locality,text_confidence=area_accepts(r,area_cfg,None)
+            if not text_ok and text_confidence.startswith('explicit-outside'):
+                batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':None,'reason':text_confidence}); continue
+
+            coords=None
+            locality=text_locality
+            confidence=text_confidence
+            if locality:
+                query=(locality+', gmina Zakliczyn, powiat tarnowski') if locality.lower()=='zakliczyn' else (locality+', gmina Zakliczyn, powiat tarnowski')
                 coords=geocoder.geocode(query)
+            elif (area_cfg or {}).get('mode')!='locality_whitelist':
+                coords=geocoder.from_jsonld(jsonld)
+                if not coords and r.get('location'):
+                    coords=geocoder.geocode(r['location'])
+
             if coords:
                 r['lat'],r['lon']=coords; r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],coords[0],coords[1])
-            else:r['lat']=r['lon']=r['distance_km']=None
-            ok,locality,confidence=area_accepts(r,area_cfg,r.get('distance_km'))
-            if not ok:
-                batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':r.get('distance_km'),'reason':confidence}); continue
+            else:
+                r['lat']=r['lon']=r['distance_km']=None
+
+            if not locality:
+                ok,locality,confidence=area_accepts(r,area_cfg,r.get('distance_km'))
+                if not ok:
+                    batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':r.get('distance_km'),'reason':confidence}); continue
             r['area_locality']=locality or r.get('location') or None; r['area_confidence']=confidence
-            if locality and (not coords or (r.get('location') or '').strip().lower() in {'zakliczyn','gmina zakliczyn'}):
-                c2=geocoder.geocode(locality+', gmina Zakliczyn, powiat tarnowski')
-                if c2:r['lat'],r['lon']=c2;r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],c2[0],c2[1])
             r['published_at']=normalize_published(r.get('published_text'))
             r['updated_at']=normalize_published(r.get('updated_text'))
             r['fingerprint']=fingerprint(r.get('title',''),r.get('area_locality') or r.get('location',''),r.get('area_m2'),r.get('price'),r.get('parcel_number'))

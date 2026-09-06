@@ -592,12 +592,12 @@ class Scraper:
         different from the old generic collector that could burn the whole source
         budget on GitHub runners when ordinary OLX pages returned 403/challenges.
         """
-        del browser  # OLX v1 collector intentionally never launches Playwright.
         pattern=re.compile(source['detail_regex'],re.I)
         errors=[];results=[];seen_urls=set();failed=[]
         api_statuses=[];api_attempt_statuses=[];api_items=0;api_plot_items=0
         api_pages_ok=0;api_parse_failures=0;api_records_ok=0;api_fail_fast=None
         html_statuses=[];html_links=[];fallback_detail_statuses=[]
+        browser_api_pages_ok=0;browser_api_statuses=[];browser_links=[];browser_detail_ok=0
         attempts=max(1,int(source.get('http_retries',3)))
         limit=max(1,min(50,int(source.get('api_limit',50))))
         api_pages=max(1,int(source.get('api_pages',2)))
@@ -612,27 +612,63 @@ class Scraper:
                 if q: queries.append(q)
         queries=list(dict.fromkeys(queries)) or ['zakliczyn']
 
+        def consume_payload(payload):
+            """Consume one OLX search JSON payload and append valid plot records."""
+            stats={'items':0,'plot':0,'parse_failures':0,'records':0}
+            if not isinstance(payload,dict):
+                return stats
+            data=payload.get('data') or []
+            if isinstance(data,dict):
+                data=data.get('offers') or data.get('items') or []
+            if not isinstance(data,list):
+                data=[]
+            stats['items']=len(data)
+            for offer in data:
+                if not isinstance(offer,dict):
+                    continue
+                url=canonical_url(str(offer.get('url') or ''),str(offer.get('url') or ''))
+                if not url or not pattern.match(url) or url in seen_urls:
+                    continue
+                if not self._olx_offer_is_plot(offer):
+                    continue
+                stats['plot']+=1
+                try:
+                    rec=self._olx_record_from_api(offer)
+                except Exception as e:
+                    stats['parse_failures']+=1
+                    if len(failed)<4:
+                        failed.append({'url':url,'status':200,'reason':f'api parse {type(e).__name__}: {e}'})
+                    continue
+                if rec and rec.get('category') in self.cfg['filters']['categories']:
+                    seen_urls.add(url);results.append(rec);stats['records']+=1
+            return stats
+
+        def api_url_for(query,page_no=0):
+            params=[('limit',str(limit)),('offset',str(page_no*limit)),('query',query)]
+            if source.get('api_sort_by','created_at:desc'):
+                params.append(('sort_by',str(source.get('api_sort_by','created_at:desc'))))
+            if source.get('api_category_id') is not None:
+                params.append(('category_id',str(source['api_category_id'])))
+            if source.get('api_city_id') is not None:
+                params.append(('city_id',str(source['api_city_id'])))
+            if source.get('api_region_id') is not None:
+                params.append(('region_id',str(source['api_region_id'])))
+            for k,v in (source.get('api_filters') or {}).items():
+                if isinstance(v,list):
+                    for x in v: params.append((str(k),str(x)))
+                elif v is not None:
+                    params.append((str(k),str(v)))
+            return 'https://www.olx.pl/api/v1/offers/?'+urlencode(params,doseq=True)
+
         stop_api=False
         consecutive_transport_failures=0
         for query in queries:
             if stop_api: break
             for page_no in range(api_pages):
-                params=[('limit',str(limit)),('offset',str(page_no*limit)),('query',query)]
-                # Sorting is best-effort; OLX has historically changed how strictly it
-                # honors created_at ordering, but it never affects correctness here.
-                if source.get('api_sort_by','created_at:desc'):
-                    params.append(('sort_by',str(source.get('api_sort_by','created_at:desc'))))
-                if source.get('api_category_id') is not None:
-                    params.append(('category_id',str(source['api_category_id'])))
-                if source.get('api_city_id') is not None:
-                    params.append(('city_id',str(source['api_city_id'])))
-                if source.get('api_region_id') is not None:
-                    params.append(('region_id',str(source['api_region_id'])))
-                for k,v in (source.get('api_filters') or {}).items():
-                    if isinstance(v,list):
-                        for x in v: params.append((str(k),str(x)))
-                    elif v is not None: params.append((str(k),str(v)))
-                api_url='https://www.olx.pl/api/v1/offers/?'+urlencode(params,doseq=True)
+                # Sorting/category/location parameters are built in one place so the
+                # same request can be retried inside a real browser session if the
+                # GitHub runner's bare HTTP request gets a 403.
+                api_url=api_url_for(query,page_no)
                 status,final_url,payload,text,hist=await self._http_json_get_retry(api_url,attempts=attempts)
                 api_statuses.append(status);api_attempt_statuses.extend(hist)
                 if status!=200 or not isinstance(payload,dict):
@@ -652,27 +688,10 @@ class Scraper:
                             api_fail_fast='2 consecutive transport failures'; stop_api=True
                     break
                 consecutive_transport_failures=0
-                data=payload.get('data') or []
-                if isinstance(data,dict):
-                    # Be tolerant if OLX ever wraps the list (some mirrors normalize it).
-                    data=data.get('offers') or data.get('items') or []
-                if not isinstance(data,list): data=[]
-                api_pages_ok += 1;api_items += len(data)
-                for offer in data:
-                    if not isinstance(offer,dict): continue
-                    url=canonical_url(str(offer.get('url') or ''),str(offer.get('url') or ''))
-                    if not url or not pattern.match(url) or url in seen_urls: continue
-                    if not self._olx_offer_is_plot(offer): continue
-                    api_plot_items += 1
-                    try:
-                        rec=self._olx_record_from_api(offer)
-                    except Exception as e:
-                        api_parse_failures += 1
-                        if len(failed)<4: failed.append({'url':url,'status':200,'reason':f'api parse {type(e).__name__}: {e}'})
-                        continue
-                    if rec and rec.get('category') in self.cfg['filters']['categories']:
-                        seen_urls.add(url);results.append(rec);api_records_ok += 1
-                if len(data)<limit: break
+                stats=consume_payload(payload)
+                api_pages_ok += 1;api_items += stats['items'];api_plot_items += stats['plot']
+                api_parse_failures += stats['parse_failures'];api_records_ok += stats['records']
+                if stats['items']<limit: break
 
         # Optional supplement: ordinary category/location page can expose nearby offers
         # that do not literally contain the query word.  It is HTTP-only and tightly
@@ -683,6 +702,129 @@ class Scraper:
                 html_statuses.extend(statuses)
                 html_links.extend(x for x in links if x not in seen_urls)
         html_links=list(dict.fromkeys(html_links))[:int(source.get('fallback_detail_pages',20))]
+
+        # GitHub-hosted IPs are sometimes rejected by OLX with HTTP 403 even though the
+        # public site and /api/v1/offers are healthy. Do one normal browser-session
+        # fallback: load the actual OLX result page, capture the JSON requests made by
+        # OLX itself, and only if that yields nothing use the rendered offer links.
+        # No CAPTCHA solving/stealth/proxying is used; a real challenge remains a block.
+        if not results and source.get('browser_session_fallback',True) and browser is not None:
+            context=None
+            response_tasks=[]
+            captured=[]
+            try:
+                context=await browser.new_context(
+                    locale='pl-PL',
+                    user_agent=(
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0 Safari/537.36'
+                    ),
+                    viewport={'width':1440,'height':1000},
+                    extra_http_headers={'Accept-Language':'pl-PL,pl;q=0.9,en;q=0.7'},
+                )
+                page=await context.new_page()
+
+                async def capture_response(resp):
+                    if '/api/v1/offers/' not in resp.url:
+                        return
+                    browser_api_statuses.append(resp.status)
+                    if resp.status!=200:
+                        return
+                    try:
+                        payload=await resp.json()
+                        if isinstance(payload,dict):
+                            captured.append(payload)
+                    except Exception:
+                        pass
+
+                def on_response(resp):
+                    if '/api/v1/offers/' in resp.url:
+                        t=asyncio.create_task(capture_response(resp))
+                        response_tasks.append(t)
+
+                page.on('response',on_response)
+                for search_url in source.get('search_urls',[])[:2]:
+                    try:
+                        await self._goto(page,search_url,scroll=True,reveal_phone=False)
+                        await page.wait_for_timeout(900)
+                        visible=clean_text(await page.locator('body').inner_text(timeout=1800))
+                        if any(m in visible.lower() for m in _BLOCK_MARKERS):
+                            errors.append(f'OLX browser fallback blocked on {search_url}')
+                            continue
+                        for href in await self._browser_hrefs(page):
+                            u=canonical_url(search_url,href)
+                            if pattern.match(u) and u not in seen_urls:
+                                browser_links.append(u)
+                    except Exception as e:
+                        errors.append(f'OLX browser search {type(e).__name__}: {e}')
+                if response_tasks:
+                    await asyncio.gather(*response_tasks,return_exceptions=True)
+                for payload in captured:
+                    stats=consume_payload(payload)
+                    browser_api_pages_ok += 1
+                    api_items += stats['items'];api_plot_items += stats['plot']
+                    api_parse_failures += stats['parse_failures'];api_records_ok += stats['records']
+
+                # If page navigation worked but OLX did not emit an API response we could
+                # capture, ask the same-origin page to fetch the public endpoint with the
+                # cookies/session OLX just established.
+                if not results:
+                    for query in queries[:4]:
+                        try:
+                            u=api_url_for(query,0)
+                            out=await page.evaluate("""async (u) => {
+                                try { const r=await fetch(u,{headers:{'Accept':'application/json'}});
+                                      return {status:r.status,text:await r.text()}; }
+                                catch(e) { return {status:0,text:String(e)}; }
+                            }""",u)
+                            st=int((out or {}).get('status') or 0);browser_api_statuses.append(st)
+                            if st!=200:
+                                continue
+                            payload=json.loads((out or {}).get('text') or '{}')
+                            stats=consume_payload(payload);browser_api_pages_ok += 1
+                            api_items += stats['items'];api_plot_items += stats['plot']
+                            api_parse_failures += stats['parse_failures'];api_records_ok += stats['records']
+                        except Exception as e:
+                            if len(failed)<4: failed.append({'url':'browser-api','status':0,'reason':f'{type(e).__name__}: {e}'})
+
+                # Last self-contained fallback: rendered OLX result links, with a small
+                # browser detail cap. This is intentionally bounded so OLX cannot consume
+                # the whole scan budget.
+                if not results and browser_links:
+                    browser_links=list(dict.fromkeys(browser_links))[:int(source.get('browser_fallback_detail_pages',15))]
+                    bsem=asyncio.Semaphore(3)
+                    async def browser_detail(u):
+                        nonlocal browser_detail_ok
+                        async with bsem:
+                            p2=await context.new_page()
+                            try:
+                                await self._goto(p2,u,scroll=False,reveal_phone=False)
+                                html=await p2.content();actual=p2.url or u
+                                rec=parse_detail(html,actual,'OLX',category_hint='plot')
+                                try: vis=await p2.locator('body').inner_text(timeout=1500)
+                                except Exception: vis=''
+                                if vis:
+                                    rec=refine_from_rendered_text(rec,vis);rec['_body']=(rec.get('_body') or '')+' '+vis[:9000]
+                                ok,blocked=self._listing_like(rec,vis)
+                                if ok and not blocked and rec.get('category') in self.cfg['filters']['categories']:
+                                    cu=rec.get('canonical_url') or u
+                                    if cu not in seen_urls:
+                                        seen_urls.add(cu);results.append(rec);browser_detail_ok += 1
+                            except Exception as e:
+                                errors.append(f'{u}: OLX browser detail {type(e).__name__}: {e}')
+                            finally:
+                                try:
+                                    if not p2.is_closed(): await p2.close()
+                                except Exception: pass
+                    await asyncio.gather(*(browser_detail(u) for u in browser_links),return_exceptions=True)
+            except Exception as e:
+                errors.append(f'OLX browser-session fallback {type(e).__name__}: {e}')
+            finally:
+                if response_tasks:
+                    await asyncio.gather(*response_tasks,return_exceptions=True)
+                if context is not None:
+                    try: await context.close()
+                    except Exception: pass
 
         sem=asyncio.Semaphore(max(1,int(source.get('parallel_details',5))))
         detail_timeout=float(source.get('detail_timeout_s',18))
@@ -725,18 +867,19 @@ class Scraper:
         healthy=bool(results and (api_pages_ok or any(x==200 for x in html_statuses)))
         diag={
             'source':'OLX','search_pages_ok':api_pages_ok + sum(1 for x in html_statuses if x==200),
-            'discovered_links':len(seen_urls)+len(html_links),'detail_pages_ok':len(results),
+            'discovered_links':len(set(seen_urls)|set(html_links)|set(browser_links)),'detail_pages_ok':len(results),
             'detail_pages_fetched':len(results),'listing_like':len(results),'records':len(results),
-            'errors':len(errors),'blocked':sum(1 for x in api_statuses+html_statuses+fallback_detail_statuses if x==403),
+            'errors':len(errors),'blocked':sum(1 for x in api_statuses+html_statuses+fallback_detail_statuses+browser_api_statuses if x==403),
             'failed_samples':failed,'healthy':healthy,
-            'discovery_methods':(['olx-api-v1'] if api_pages_ok else []) + (['html-supplement'] if html_links else []),
-            'detail_methods':{'api-records':api_records_ok,'http-fallback':max(0,len(results)-api_records_ok)},
+            'discovery_methods':(['olx-api-v1'] if api_pages_ok else []) + (['olx-browser-session'] if (browser_api_pages_ok or browser_links) else []) + (['html-supplement'] if html_links else []),
+            'detail_methods':{'api-records':api_records_ok,'browser-detail':browser_detail_ok,'http-fallback':max(0,len(results)-api_records_ok-browser_detail_ok)},
             'http_statuses':html_statuses[-12:],'api_statuses':api_statuses[-12:],
             'api_attempt_statuses':api_attempt_statuses[-24:],'fallback_detail_statuses':fallback_detail_statuses[-12:],
             'api_pages_ok':api_pages_ok,'api_items':api_items,'api_plot_items':api_plot_items,
             'api_parse_failures':api_parse_failures,'api_records_ok':api_records_ok,'api_queries':queries,
-            'api_fail_fast':api_fail_fast,
-            'html_supplement_links':len(html_links),'collector':'olx-public-api-v1',
+            'api_fail_fast':api_fail_fast,'browser_api_pages_ok':browser_api_pages_ok,
+            'browser_api_statuses':browser_api_statuses[-12:],'browser_links':len(browser_links),
+            'html_supplement_links':len(html_links),'collector':'olx-public-api-v2-browser-session-fallback',
             'detail_timeouts_or_cancelled':sum(1 for e in errors if 'timeout' in e.lower()),
         }
         if not results:
@@ -990,7 +1133,7 @@ class Scraper:
                         if rec is None:
                             p = await context.new_page()
                             try:
-                                await self._goto(p, u, reveal_phone=True)
+                                await self._goto(p, u, reveal_phone=bool(source.get('reveal_phone', True)))
                                 try:
                                     await p.locator("h1").first.wait_for(state="visible", timeout=2500)
                                 except Exception:

@@ -66,6 +66,23 @@ def detect_allowed_locality(location: str | None, title: str | None, description
     known_outside = list(area_cfg.get('known_outside_localities') or [])
     known = list(dict.fromkeys(known_gmina + known_outside + allowed))
 
+    # 0) Explicit county/municipality evidence is stronger than fuzzy locality/distance.
+    # This prevents false accepts such as "Olcha, powiat żuromiński" being rescued
+    # by an unrelated JSON-LD coordinate from a recommendation widget.
+    strong_text=' '.join([location or '', title or '', (description or '')[:1200]])
+    ft=fold(strong_text)
+    county_hits=re.findall(r'powiat\s+([a-ząćęłńóśźż -]{3,40})', ft, re.I)
+    for county in county_hits:
+        c=fold(county).strip(' ,.-')
+        if c and not c.startswith('tarnowsk'):
+            return None, 'explicit-outside-county'
+    municipality_hits=re.findall(r'(?:gmina|gm\.)\s+([a-ząćęłńóśźż -]{3,40})', ft, re.I)
+    for municipality in municipality_hits:
+        g=fold(municipality).strip(' ,.-')
+        # Allow the target municipality only.  A different explicit gmina is decisive.
+        if g and not g.startswith('zakliczyn'):
+            return None, 'explicit-outside-gmina'
+
     # 1) Parsed location field is strongest, but may be verbose ("Słona, gm. Zakliczyn...").
     loc_hits=_find_names(location or '', known)
     if loc_hits:
@@ -86,7 +103,7 @@ def detect_allowed_locality(location: str | None, title: str | None, description
 
     # 3) Description: only trust the beginning. Recommendation widgets/footer text farther
     # down the DOM frequently contain unrelated towns.
-    early=(description or '')[:3500]
+    early=(description or '')[:1200]
     desc_hit=_first_hit(early, known)
     if desc_hit:
         chosen,pos=desc_hit

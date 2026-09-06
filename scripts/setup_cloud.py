@@ -59,9 +59,24 @@ if index_stmts:
 print(f'[OK] D1 indexes: {len(index_stmts)} statements')
 
 base=f'https://api.telegram.org/bot{bot}/'
-def tg(method,payload):
-    rr=requests.post(base+method,json=payload,timeout=30);rr.raise_for_status();d=rr.json()
-    if not d.get('ok'):raise SystemExit(f'Telegram {method}: '+str(d))
+def tg(method,payload,*,fatal=True):
+    try:
+        rr=requests.post(base+method,json=payload,timeout=30)
+    except requests.RequestException as e:
+        if fatal:
+            raise SystemExit(f'Telegram {method} request failed: {e}')
+        print(f'[WARN] Telegram {method} request failed: {e}')
+        return None
+    try:
+        d=rr.json()
+    except ValueError:
+        d={'ok':False,'description':rr.text[:1000]}
+    if rr.status_code >= 400 or not d.get('ok'):
+        msg=f'Telegram {method} HTTP {rr.status_code}: {d.get("description") or d}'
+        if fatal:
+            raise SystemExit(msg)
+        print('[WARN]',msg)
+        return None
     return d.get('result')
 
 # Hard reset the webhook and pending queue so Telegram cannot keep retrying stale updates.
@@ -83,21 +98,23 @@ tg('setMyCommands',{'commands':[
     {'command':'id','description':'Pokaż Telegram user_id'},
     {'command':'diag','description':'Diagnostyka (admin)'},
 ]})
-# Reset global menu button before setting the stable Worker URL. This invalidates old
-# trycloudflare menu configuration instead of layering a new value on top of it.
-tg('setChatMenuButton',{'menu_button':{'type':'default'}})
+# Set the global Mini App button directly. A separate MenuButtonDefault reset is
+# unnecessary and can be rejected by Telegram in some chat/menu states.
 tg('setChatMenuButton',{'menu_button':{'type':'web_app','text':'🏡 Oferty','web_app':{'url':panel}}})
 
-# A per-chat menu override has priority over the global button. Previous versions created
-# such an override, so force-refresh every notification chat as well.
+# A per-chat override has priority over the global button. Refresh private notification
+# chats directly to web_app; no intermediate `default` reset is required. Invalid/non-private
+# chat IDs are warned about instead of aborting the entire cloud setup.
 for cid in sorted(set(chat_ids)):
-    tg('setChatMenuButton',{'chat_id':cid,'menu_button':{'type':'default'}})
-    tg('setChatMenuButton',{'chat_id':cid,'menu_button':{'type':'web_app','text':'🏡 Oferty','web_app':{'url':panel}}})
-    actual=tg('getChatMenuButton',{'chat_id':cid}) or {}
+    changed=tg('setChatMenuButton',{'chat_id':cid,'menu_button':{'type':'web_app','text':'🏡 Oferty','web_app':{'url':panel}}},fatal=False)
+    if changed is None:
+        print(f'[WARN] menu chat {cid}: pomijam per-chat override; global Mini App menu pozostaje aktywne')
+        continue
+    actual=tg('getChatMenuButton',{'chat_id':cid},fatal=False) or {}
     actual_url=((actual.get('web_app') or {}).get('url') or '')
     print(f'[OK] menu chat {cid}: type={actual.get("type")} url={actual_url}')
     if actual.get('type')!='web_app' or actual_url.rstrip('/')!=panel.rstrip('/'):
-        raise SystemExit(f'Telegram menu mismatch for chat {cid}: {actual}')
+        print(f'[WARN] Telegram menu mismatch for chat {cid}: {actual}; global menu nadal ustawione')
 
 print('[OK] Telegram webhook + komendy + Mini App menu')
 print('Webhook:',panel+'/telegram/webhook')

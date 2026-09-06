@@ -469,7 +469,6 @@ Twój user_id: <code>${escapeHtml(userId)}</code>`,{inline_keyboard:[]});return 
     const cid=Number(chatId);
     try {
       if(Number.isSafeInteger(cid)){
-        await telegramApi(env,'setChatMenuButton',{chat_id:cid,menu_button:{type:'default'}});
         await telegramApi(env,'setChatMenuButton',{chat_id:cid,menu_button:{type:'web_app',text:'🏡 Oferty',web_app:{url:origin}}});
       }
     } catch(e) { console.warn('setChatMenuButton repair failed', e?.message||e); }

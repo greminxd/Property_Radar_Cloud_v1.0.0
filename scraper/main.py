@@ -18,7 +18,7 @@ from app.rcn import RCNClient, RCN_PARSER_VERSION
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
-LISTING_PARSER_VERSION='1.3.0-ppm-source-timeouts'
+LISTING_PARSER_VERSION='1.3.1-otodom-next-data'
 
 def need(name):
     v=os.getenv(name,'').strip()

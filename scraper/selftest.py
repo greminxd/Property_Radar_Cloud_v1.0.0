@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone, timedelta
 from app.parser import parse_detail, refine_from_rendered_text
 from app.area import area_accepts
@@ -163,3 +164,21 @@ _tab_links,_=Scraper._extract_links_from_html('https://tabelaofert.pl/sprzedaz/d
 _tab_links=Scraper._source_filter_discovery('Tabelaofert',_tab_html,_tab_links)
 assert len(_tab_links)==3,_tab_links
 print('SELFTEST OK v1.3.0 Tabelaofert discovery cap')
+
+
+# v1.3.1: dedicated Otodom discovery reads Next.js searchAds.items, not CSS card links.
+_oto_payload={
+    "props":{"pageProps":{"data":{"searchAds":{"items":[
+        {"slug":"dzialka-zakliczyn-ID4abc"},
+        {"detailUrl":"https://www.otodom.pl/pl/oferta/druga-dzialka-ID4def"},
+    ]}}}}
+}
+_items=Scraper._otodom_search_items(_oto_payload)
+assert len(_items)==2,_items
+assert Scraper._otodom_item_url(_items[0])=='https://www.otodom.pl/pl/oferta/dzialka-zakliczyn-ID4abc'
+assert Scraper._otodom_item_url(_items[1])=='https://www.otodom.pl/pl/oferta/druga-dzialka-ID4def'
+_html='<html><script id="__NEXT_DATA__" type="application/json">'+json.dumps(_oto_payload)+'</script></html>'
+assert Scraper._otodom_search_items(Scraper._next_data(_html))==_items
+assert 'page=3' in Scraper._page_url('https://www.otodom.pl/pl/wyniki/sprzedaz/dzialka/x?limit=72',3)
+
+print("SELFTEST OK v1.3.1 Otodom NextData")

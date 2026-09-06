@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
+import time
 from typing import Iterable
 
 import requests
@@ -131,6 +133,242 @@ class Scraper:
     async def _http_get(self, url: str):
         return await asyncio.to_thread(self._http_get_sync, url)
 
+    async def _http_get_retry(self, url: str, attempts: int = 3, delays=(0.0, 1.5, 4.0)):
+        """HTTP GET with a small bounded retry policy for transient portal errors."""
+        history=[]
+        last=(0,url,"")
+        attempts=max(1,int(attempts))
+        for i in range(attempts):
+            if i:
+                delay=delays[min(i,len(delays)-1)] if delays else 0
+                if delay:
+                    await asyncio.sleep(float(delay))
+            last=await self._http_get(url)
+            status,final_url,html=last
+            history.append(status)
+            # Retry only transport errors, throttling and server-side failures.
+            if status==200:
+                break
+            if status not in {0,403,408,425,429,500,502,503,504}:
+                break
+        return (*last,history)
+
+    @staticmethod
+    def _next_data(html: str):
+        if not html or html.startswith("__HTTP_ERROR__"):
+            return None
+        try:
+            soup=BeautifulSoup(html,"lxml")
+            tag=soup.find("script",id="__NEXT_DATA__")
+            raw=(tag.string or tag.get_text() or "").strip() if tag else ""
+            return json.loads(raw) if raw else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _walk_json(obj):
+        stack=[obj]
+        while stack:
+            x=stack.pop()
+            if isinstance(x,dict):
+                yield x
+                stack.extend(x.values())
+            elif isinstance(x,list):
+                stack.extend(x)
+
+    @classmethod
+    def _otodom_search_items(cls, payload) -> list[dict]:
+        """Return Otodom searchAds.items from Next.js payload without hardcoding pageProps depth."""
+        if not payload:
+            return []
+        for d in cls._walk_json(payload):
+            search_ads=d.get("searchAds")
+            if isinstance(search_ads,dict) and isinstance(search_ads.get("items"),list):
+                return [x for x in search_ads["items"] if isinstance(x,dict)]
+        return []
+
+    @staticmethod
+    def _otodom_item_url(item: dict) -> str | None:
+        # Field names changed a few times; accept only canonical Otodom detail URLs.
+        for key in ("detailUrl","url","href","canonicalUrl"):
+            v=item.get(key)
+            if isinstance(v,str) and v:
+                if v.startswith("/"):
+                    v=urljoin("https://www.otodom.pl",v)
+                if re.match(r"https?://(?:www\.)?otodom\.pl/pl/oferta/[^?#]+",v,re.I):
+                    return canonical_url(v,v)
+        slug=item.get("slug")
+        if isinstance(slug,str) and slug.strip():
+            slug=slug.strip().strip("/")
+            if slug.startswith("pl/oferta/"):
+                return canonical_url("https://www.otodom.pl/"+slug,"https://www.otodom.pl/"+slug)
+            if "/pl/oferta/" in slug and slug.startswith("http"):
+                return canonical_url(slug,slug)
+            return canonical_url("https://www.otodom.pl/pl/oferta/"+slug,"https://www.otodom.pl/pl/oferta/"+slug)
+        return None
+
+    @staticmethod
+    def _page_url(url: str, page_no: int) -> str:
+        from urllib.parse import urlsplit, parse_qsl, urlencode, urlunsplit
+        if page_no <= 1:
+            return url
+        parts=urlsplit(url)
+        q=dict(parse_qsl(parts.query,keep_blank_values=True))
+        q["page"]=str(page_no)
+        return urlunsplit((parts.scheme,parts.netloc,parts.path,urlencode(q,doseq=True),parts.fragment))
+
+    async def _collect_otodom(self, browser, source):
+        """Dedicated Otodom collector based on Next.js __NEXT_DATA__.
+
+        Search discovery never depends on CSS classes. Detail pages stay HTTP-first and
+        reuse the mature generic detail parser, which already understands embedded JSON.
+        A single browser search fallback is retained for datacenter responses where the
+        server HTML is incomplete, but detail scraping does not fan out Playwright tabs.
+        """
+        pattern=re.compile(source["detail_regex"],re.I)
+        errors=[]
+        links=[]
+        statuses=[]
+        retry_statuses=[]
+        next_data_pages=0
+        next_data_items=0
+        browser_search_fallbacks=0
+        max_pages=max(1,int(source.get("max_search_pages",1)))
+        attempts=max(1,int(source.get("http_retries",3)))
+
+        for base in source.get("search_urls",[]):
+            for page_no in range(1,max_pages+1):
+                u=self._page_url(base,page_no)
+                status,final_url,html,hist=await self._http_get_retry(u,attempts=attempts)
+                statuses.append(status);retry_statuses.extend(hist)
+                payload=self._next_data(html) if status==200 else None
+                items=self._otodom_search_items(payload)
+                if payload is not None:
+                    next_data_pages += 1
+                if items:
+                    next_data_items += len(items)
+                    for item in items:
+                        v=self._otodom_item_url(item)
+                        if v and pattern.match(v): links.append(v)
+                    # Empty next page means pagination is finished.
+                    continue
+                # The new collector deliberately does not scrape card CSS. One lightweight
+                # browser attempt may still expose __NEXT_DATA__ if raw HTTP was challenged.
+                if page_no==1 and source.get("browser_search_fallback",True):
+                    context=None
+                    try:
+                        context=await browser.new_context(locale="pl-PL",user_agent=self._http.headers.get("User-Agent"))
+                        page=await context.new_page()
+                        rendered=await self._goto(page,u,scroll=False)
+                        payload=self._next_data(rendered)
+                        bitems=self._otodom_search_items(payload)
+                        browser_search_fallbacks += 1
+                        if payload is not None: next_data_pages += 1
+                        if bitems:
+                            next_data_items += len(bitems)
+                            for item in bitems:
+                                v=self._otodom_item_url(item)
+                                if v and pattern.match(v): links.append(v)
+                    except Exception as e:
+                        errors.append(f"{u}: browser search fallback {type(e).__name__}: {e}")
+                    finally:
+                        if context is not None:
+                            try: await context.close()
+                            except Exception: pass
+                # If first page has no searchAds, more pages will not help.
+                if page_no==1 and not links:
+                    break
+
+        links=list(dict.fromkeys(links))[:int(source.get("max_detail_pages",80))]
+        detail_parallel=max(1,int(source.get("parallel_details",5)))
+        detail_timeout=float(source.get("detail_timeout_s",18))
+        detail_budget=float(source.get("detail_budget_s",90))
+        sem=asyncio.Semaphore(detail_parallel)
+        results=[]
+        detail_http_statuses=[]
+        detail_attempt_statuses=[]
+        detail_ok=0
+        blocked=0
+        failed=[]
+        started=asyncio.get_running_loop().time()
+
+        async def one(u):
+            nonlocal detail_ok,blocked
+            async with sem:
+                status,final_url,html,hist=await self._http_get_retry(u,attempts=attempts)
+                detail_http_statuses.append(status);detail_attempt_statuses.extend(hist)
+                if status!=200 or len(html)<500:
+                    if len(failed)<4: failed.append({"url":u,"status":status,"reason":"http detail failed"})
+                    return
+                rec=parse_detail(html,final_url or u,"Otodom",category_hint="plot")
+                body=rec.get("_body") or ""
+                rec["category"]=classify_category(rec.get("title") or "",final_url or u,body,category_hint="plot")
+                if body: rec=refine_from_rendered_text(rec,body)
+                ok,is_blocked=self._listing_like(rec,body)
+                detail_ok += 1
+                if is_blocked: blocked += 1
+                if ok and rec.get("category") in self.cfg["filters"]["categories"]:
+                    results.append(rec)
+                elif len(failed)<4:
+                    failed.append({"url":u,"status":status,"reason":"not listing-like","title":(rec.get("title") or "")[:140],"text":body[:180]})
+
+        timeout_count=0
+        for i in range(0,len(links),detail_parallel):
+            elapsed=asyncio.get_running_loop().time()-started
+            if elapsed>=detail_budget:
+                errors.append(f"Otodom: detail budget {detail_budget:.0f}s exhausted; skipped {len(links)-i}")
+                timeout_count += len(links)-i
+                break
+            batch=[]
+            for u in links[i:i+detail_parallel]:
+                async def bounded(x=u):
+                    nonlocal timeout_count
+                    try: await asyncio.wait_for(one(x),timeout=detail_timeout)
+                    except asyncio.TimeoutError:
+                        timeout_count += 1; errors.append(f"{x}: detail timeout after {detail_timeout:.0f}s")
+                    except Exception as e:
+                        errors.append(f"{x}: Otodom detail {type(e).__name__}: {e}")
+                batch.append(asyncio.create_task(bounded()))
+            remaining=max(1.0,detail_budget-(asyncio.get_running_loop().time()-started))
+            done,pending=await asyncio.wait(batch,timeout=remaining)
+            if pending:
+                timeout_count += len(pending)
+                for t in pending:t.cancel()
+                await asyncio.gather(*pending,return_exceptions=True)
+                errors.append(f"Otodom: detail budget exhausted inside batch; cancelled {len(pending)}")
+                break
+            print(f"       Otodom: szczegóły {min(i+detail_parallel,len(links))}/{len(links)}",flush=True)
+
+        healthy=bool(next_data_pages and links and detail_ok and results)
+        diag={
+            "source":"Otodom",
+            "search_pages_ok":next_data_pages,
+            "discovered_links":len(links),
+            "detail_pages_ok":len(results),
+            "detail_pages_fetched":detail_ok,
+            "listing_like":len(results),
+            "records":len(results),
+            "errors":len(errors),
+            "blocked":blocked,
+            "failed_samples":failed,
+            "healthy":healthy,
+            "discovery_methods":["next-data"] + (["browser-next-data"] if browser_search_fallbacks else []),
+            "detail_methods":{"http-next-data":detail_ok,"browser":0},
+            "http_statuses":statuses[-12:],
+            "http_attempt_statuses":retry_statuses[-24:],
+            "detail_http_statuses":detail_http_statuses[-12:],
+            "detail_attempt_statuses":detail_attempt_statuses[-24:],
+            "next_data_pages":next_data_pages,
+            "next_data_items":next_data_items,
+            "browser_search_fallbacks":browser_search_fallbacks,
+            "detail_timeouts_or_cancelled":timeout_count,
+            "collector":"otodom-next-data-v1",
+        }
+        if not links:
+            errors.append("Otodom: __NEXT_DATA__ nie zwrócił linków searchAds.items")
+            diag["errors"]=len(errors)
+        return results,errors,diag
+
     @staticmethod
     def _navigation_url(base_url: str, href: str) -> str:
         """URL for pagination/navigation: preserve query string, drop only fragment."""
@@ -230,7 +468,10 @@ class Scraper:
         return None, body, status
 
     async def collect_source(self, browser, source):
-        """Return (records, errors, diagnostics) with HTTP-first discovery + browser fallback."""
+        """Return (records, errors, diagnostics) with portal-specific collectors where needed."""
+        if source.get("name")=="Otodom":
+            return await self._collect_otodom(browser,source)
+
         context = await browser.new_context(
             locale="pl-PL",
             user_agent=(

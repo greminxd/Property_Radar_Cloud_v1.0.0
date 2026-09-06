@@ -112,18 +112,14 @@
       "detail_regex": "https?://(?:www\\.)?otodom\\.pl/pl/oferta/[^?#]+",
       "prefer_http_discovery": true,
       "prefer_http_details": true,
-      "fallback_discovery_urls": [
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zakliczyn/",
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zdonia/",
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-slona/",
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-palesnica/"
-      ],
-      "max_search_pages": 1,
-      "max_detail_pages": 35,
-      "parallel_details": 5,
-      "detail_timeout_s": 20,
-      "detail_budget_s": 115,
-      "source_timeout_s": 165
+      "max_search_pages": 3,
+      "max_detail_pages": 80,
+      "parallel_details": 6,
+      "detail_timeout_s": 18,
+      "detail_budget_s": 105,
+      "source_timeout_s": 140,
+      "http_retries": 3,
+      "browser_search_fallback": true
     },
     {
       "name": "OLX",

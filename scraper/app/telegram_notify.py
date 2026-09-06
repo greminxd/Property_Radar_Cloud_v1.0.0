@@ -131,10 +131,15 @@ def listing_message(r,kind='new',old_price=None):
     if r.get('plot_type'): lines.append(f'🏷 {esc(r.get("plot_type"))} • 🏗 {esc(r.get("planning_status") or "nieustalone")}')
     if r.get('median_comparable'):
         lines.append(f'📢 Ogłoszenia w porównaniu: mediana <b>{ppm(r.get("median_comparable"))}</b> • średnia {ppm(r.get("market_mean_comparable"))} ({r.get("comparable_count") or 0})')
-    if r.get('rcn_median_ppm'):
+    rq=str(r.get('rcn_quality') or '').lower()
+    if r.get('rcn_median_ppm') and int(r.get('rcn_count') or 0)>=3 and not rq.startswith(('brak','za mało')):
         lines.append(f'🏛 RCN {r.get("rcn_months") or 24} mies.: mediana <b>{ppm(r.get("rcn_median_ppm"))}</b> • średnia {ppm(r.get("rcn_mean_ppm"))} ({r.get("rcn_count") or 0} trans., ≤{r.get("rcn_radius_km") or "?"} km)')
-        if r.get('rcn_last_date'): lines.append(f'🧾 Ostatnia transakcja: {_date_only(r.get("rcn_last_date"))} • {ppm(r.get("rcn_last_ppm"))}')
+        if r.get('rcn_last_date'): lines.append(f'🧾 Ostatnia porównywalna: {_date_only(r.get("rcn_last_date"))} • {ppm(r.get("rcn_last_ppm"))}')
     if r.get('phone'): lines.append(f'☎️ <b>{esc(r.get("phone"))}</b>')
     if r.get('parcel_number'): lines.append(f'🗺 Nr działki: <b>{esc(r.get("parcel_number"))}</b>')
+    if int(r.get('rcn_history_count') or 0)>0 and r.get('rcn_history_last_date'):
+        whole='property-level' in str(r.get('rcn_history_match') or '')
+        label='cena całej nieruchomości obejmującej działkę' if whole else 'cena tej działki wg RCN'
+        lines.append(f'🧾 Historia RCN: <b>{_date_only(r.get("rcn_history_last_date"))}</b> • {money(r.get("rcn_history_last_price"))} • {ppm(r.get("rcn_history_last_ppm"))} ({label})')
     lines.append(f'🌐 {esc(r.get("source") or "?")}')
     return '\n'.join(lines)

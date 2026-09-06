@@ -8,12 +8,13 @@ import requests
 
 LISTING_COLUMNS = [
     'canonical_url','source','fingerprint','category','title','price','area_m2','price_m2',
-    'plot_type','planning_status','location','lat','lon','distance_km','phone','parcel_number',
+    'plot_type','planning_status','location','lat','lon','distance_km','phone','parcel_number','parcel_id','parcel_id_confidence',
     'published_text','published_at','updated_text','updated_at','source_status','archive_reason',
     'area_warning','image_url','location_confidence','area_locality','area_confidence',
     'privacy_score','privacy_reasons','deal_label','median_comparable','market_mean_comparable','comparable_count',
     'comparison_quality','rcn_median_ppm','rcn_mean_ppm','rcn_count','rcn_radius_km','rcn_months',
-    'rcn_last_date','rcn_last_ppm','rcn_quality','description'
+    'rcn_last_date','rcn_last_ppm','rcn_quality','rcn_history_count','rcn_history_last_date',
+    'rcn_history_last_price','rcn_history_last_ppm','rcn_history_match','description'
 ]
 
 class CloudDB:
@@ -131,6 +132,22 @@ class CloudDB:
             changed+=n
         return changed
 
+    def delete_urls(self,urls):
+        """Physically remove invalid listings and their Radar price history."""
+        urls=[u for u in dict.fromkeys(urls or []) if u]
+        if not urls:return 0
+        deleted=0
+        for i in range(0,len(urls),50):
+            chunk=urls[i:i+50]; qs=','.join('?' for _ in chunk)
+            rows=self.query(f'SELECT id FROM listings WHERE canonical_url IN ({qs})',chunk)
+            ids=[int(r['id']) for r in rows if r.get('id') is not None]
+            if ids:
+                iq=','.join('?' for _ in ids)
+                self.execute(f'DELETE FROM price_history WHERE listing_id IN ({iq})',ids)
+            self.execute(f'DELETE FROM listings WHERE canonical_url IN ({qs})',chunk)
+            deleted+=len(ids)
+        return deleted
+
     def count_scans_between(self,start_iso,end_iso):
         rows=self.query('SELECT COUNT(*) c FROM scan_runs WHERE finished_at>=? AND finished_at<?',[start_iso,end_iso])
         return int(rows[0]['c']) if rows else 0
@@ -205,20 +222,22 @@ class CloudDB:
         stmts=[]
         for r in rows:
             stmts.append(("""UPDATE listings SET privacy_score=NULL,privacy_reasons='',deal_label=?,median_comparable=?,market_mean_comparable=?,comparable_count=?,comparison_quality=?,
-                rcn_median_ppm=?,rcn_mean_ppm=?,rcn_count=?,rcn_radius_km=?,rcn_months=?,rcn_last_date=?,rcn_last_ppm=?,rcn_quality=? WHERE id=?""",[
+                rcn_median_ppm=?,rcn_mean_ppm=?,rcn_count=?,rcn_radius_km=?,rcn_months=?,rcn_last_date=?,rcn_last_ppm=?,rcn_quality=?,
+                rcn_history_count=?,rcn_history_last_date=?,rcn_history_last_price=?,rcn_history_last_ppm=?,rcn_history_match=? WHERE id=?""",[
                 r.get('deal_label'),r.get('median_comparable'),r.get('market_mean_comparable'),r.get('comparable_count',0),r.get('comparison_quality'),
                 r.get('rcn_median_ppm'),r.get('rcn_mean_ppm'),r.get('rcn_count',0),r.get('rcn_radius_km'),r.get('rcn_months'),
-                r.get('rcn_last_date'),r.get('rcn_last_ppm'),r.get('rcn_quality'),r['id']]))
+                r.get('rcn_last_date'),r.get('rcn_last_ppm'),r.get('rcn_quality'),
+                r.get('rcn_history_count',0),r.get('rcn_history_last_date'),r.get('rcn_history_last_price'),r.get('rcn_history_last_ppm'),r.get('rcn_history_match'),r['id']]))
         self.batch(stmts)
 
     def upsert_rcn_transactions(self,rows):
         if not rows: return
         now=self.now(); stmts=[]
-        sql='''INSERT INTO rcn_transactions(tx_key,transaction_date,price,area_m2,price_m2,parcel_number,mpzp,use_type,address,lat,lon,fetched_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(tx_key) DO UPDATE SET transaction_date=excluded.transaction_date,price=excluded.price,area_m2=excluded.area_m2,price_m2=excluded.price_m2,parcel_number=excluded.parcel_number,mpzp=excluded.mpzp,use_type=excluded.use_type,address=excluded.address,lat=excluded.lat,lon=excluded.lon,fetched_at=excluded.fetched_at'''
+        sql='''INSERT INTO rcn_transactions(tx_key,transaction_date,price,area_m2,price_m2,parcel_number,parcel_id,transaction_id,price_basis,mpzp,use_type,address,lat,lon,fetched_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(tx_key) DO UPDATE SET transaction_date=excluded.transaction_date,price=excluded.price,area_m2=excluded.area_m2,price_m2=excluded.price_m2,parcel_number=excluded.parcel_number,parcel_id=excluded.parcel_id,transaction_id=excluded.transaction_id,price_basis=excluded.price_basis,mpzp=excluded.mpzp,use_type=excluded.use_type,address=excluded.address,lat=excluded.lat,lon=excluded.lon,fetched_at=excluded.fetched_at'''
         for r in rows:
-            stmts.append((sql,[r.get('tx_key'),r.get('transaction_date'),r.get('price'),r.get('area_m2'),r.get('price_m2'),r.get('parcel_number'),r.get('mpzp'),r.get('use_type'),r.get('address'),r.get('lat'),r.get('lon'),now]))
+            stmts.append((sql,[r.get('tx_key'),r.get('transaction_date'),r.get('price'),r.get('area_m2'),r.get('price_m2'),r.get('parcel_number'),r.get('parcel_id'),r.get('transaction_id'),r.get('price_basis'),r.get('mpzp'),r.get('use_type'),r.get('address'),r.get('lat'),r.get('lon'),now]))
         self.batch(stmts)
 
     def purge_old_rcn(self,cutoff_iso): self.execute('DELETE FROM rcn_transactions WHERE transaction_date IS NOT NULL AND transaction_date < ?',[cutoff_iso])
@@ -228,6 +247,15 @@ class CloudDB:
             return self.query('SELECT * FROM rcn_transactions WHERE transaction_date IS NOT NULL AND transaction_date>=? ORDER BY transaction_date DESC',[cutoff_iso])
         return self.query('SELECT * FROM rcn_transactions ORDER BY transaction_date DESC')
 
+
+    def parcel_cache_get(self,key):
+        rows=self.query('SELECT * FROM parcel_lookup_cache WHERE lookup_key=?',[key]); return rows[0] if rows else None
+
+    def parcel_cache_put(self,key,locality,parcel_number,parcel_id,lat,lon,area_m2,status):
+        self.execute('''INSERT INTO parcel_lookup_cache(lookup_key,locality,parcel_number,parcel_id,lat,lon,area_m2,status,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(lookup_key) DO UPDATE SET locality=excluded.locality,parcel_number=excluded.parcel_number,
+            parcel_id=excluded.parcel_id,lat=excluded.lat,lon=excluded.lon,area_m2=excluded.area_m2,status=excluded.status,updated_at=excluded.updated_at''',
+            [key,locality,parcel_number,parcel_id,lat,lon,area_m2,status,self.now()])
 
     def geocode_get(self,q):
         rows=self.query('SELECT * FROM geocode_cache WHERE query=?',[q]); return rows[0] if rows else None

@@ -259,3 +259,64 @@ _cfg=json.load(open('config.json',encoding='utf-8'))
 _olx=next(x for x in _cfg['sources'] if x['name']=='OLX')
 assert set(_olx['api_queries'])==set(area_cfg['primary_localities']+area_cfg['nearby_localities'])
 print('SELFTEST OK v1.4.3 canonical locality registry')
+
+# v1.4.4: RCN parcel history must prefer the full official EGiB id. Parcel numbers
+# alone repeat between cadastral precincts and can never be treated as globally unique.
+_rc_hist=RCNClient(49.82625,20.8099,{})
+_listing={
+    'category':'plot','parcel_number':'142/1','parcel_id':'120000_2.0001.142/1',
+    'parcel_id_confidence':'egib-exact','area_locality':'Lusławice','location':'Lusławice',
+    'area_m2':3600,'lat':49.82625,'lon':20.8099,
+}
+_hist_rows=[
+    {'tx_key':'a','transaction_id':'T-1','transaction_date':'2025-05-10T00:00:00+00:00','price':300000,'area_m2':3600,'price_m2':83.33,
+     'parcel_number':'142/1','parcel_id':'120000_2.0001.142/1','price_basis':'parcel','address':'Lusławice','lat':49.82625,'lon':20.8099},
+    {'tx_key':'b','transaction_id':'T-2','transaction_date':'2023-02-01T00:00:00+00:00','price':600000,'area_m2':8000,'price_m2':75,
+     'parcel_number':'142/1','parcel_id':'120000_2.0001.142/1','price_basis':'property','address':'Lusławice','lat':49.82625,'lon':20.8099},
+    # Same visible number but another official cadastral id: MUST NOT match.
+    {'tx_key':'foreign','transaction_id':'T-X','transaction_date':'2024-01-01T00:00:00+00:00','price':999999,'area_m2':3600,'price_m2':277.77,
+     'parcel_number':'142/1','parcel_id':'999999_9.9999.142/1','price_basis':'parcel','address':'inna miejscowość','lat':50.2,'lon':21.2},
+]
+_hist=_rc_hist.find_parcel_history(_listing,_hist_rows)
+assert [x['transaction_id'] for x in _hist]==['T-1','T-2'],_hist
+assert _hist[0]['history_match']=='egib-id-exact',_hist
+assert _hist[1]['history_match']=='egib-id-property-level',_hist
+
+# Without official id, a conservative fallback needs number + locality + compatible area.
+_fallback=dict(_listing,parcel_id=None,parcel_id_confidence=None)
+_fallback_hist=_rc_hist.find_parcel_history(_fallback,[_hist_rows[0],_hist_rows[2]])
+assert len(_fallback_hist)==1 and _fallback_hist[0]['transaction_id']=='T-1',_fallback_hist
+
+# Whole-property RCN entries may occur once per member parcel. They remain available
+# for exact history, but must count only once in the market benchmark.
+_now=datetime.now(timezone.utc)
+_dup_prop=[]
+for i in range(3):
+    for parcel_id in ['P-A','P-B']:
+        _dup_prop.append({
+            'transaction_id':f'PROP-{i}','price_basis':'property','parcel_id':parcel_id,
+            'transaction_date':(_now-timedelta(days=30*i)).isoformat(),
+            'price':400000+i*10000,'area_m2':4000,'price_m2':100+i*2,
+            'lat':49.82625+i*0.0002,'lon':20.8099,
+        })
+_bench=_rc_hist.analyze({'category':'plot','area_m2':3800,'lat':49.82625,'lon':20.8099},_dup_prop,24,3)
+assert _bench['rcn_count']==3,_bench
+print('SELFTEST OK v1.4.4 exact EGiB / RCN parcel history')
+
+# v1.4.6: regression for the exact OLX false-positive class seen in production.
+_reel={
+    "url":"https://www.olx.pl/d/oferta/nowy-kolowrotek-samolla-ksn-8000-12-1-bb-karpiowy-surfcasting-1-sztuki-CID767-ID1ccuyw.html",
+    "title":"Nowy Kołowrotek Samolla KSN 8000 | 12+1 BB | Karpiowy Surfcasting | 1 sztuki",
+    "description":"Kołowrotek do połowu gruntowego i surfcastingu, odporny na słoną wodę.",
+    "params":[],
+    "location":{"city":{"name":"Bielsko-Biała"},"region":{"name":"Śląskie"}},
+}
+assert classify_category(_reel['title'],_reel['url'],_reel['description'],None)=='other',_reel
+assert not Scraper._olx_offer_is_plot(_reel),_reel
+_fake_plot=dict(_olx_offer,location={"city":{"name":"Bielsko-Biała"},"region":{"name":"Śląskie"}},description='Działka testowa; słona woda w pobliżu')
+_fake_rec=Scraper._olx_record_from_api(_fake_plot)
+assert _fake_rec['location']=='Bielsko-Biała' and _fake_rec['location_confidence']=='olx-api-structured',_fake_rec
+ok,loc,why=area_accepts(_fake_rec,area_cfg,1.9)
+assert not ok and loc is None and why=='olx-structured-location-outside-target',(ok,loc,why)
+assert next(x for x in _cfg['sources'] if x['name']=='OLX').get('api_category_id')==3
+print('SELFTEST OK v1.4.6 OLX strict category/location')

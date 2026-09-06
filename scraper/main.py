@@ -3,6 +3,7 @@ import asyncio,copy,json,os,sys,time,traceback
 from datetime import datetime,timezone,timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
+from dateutil.relativedelta import relativedelta
 from statistics import median,mean
 from playwright.async_api import async_playwright
 
@@ -10,15 +11,18 @@ from app.cloud_db import CloudDB
 from app.scraper import Scraper
 from app.geocode import Geocoder
 from app.area import area_accepts
+from app.classify import classify_category, olx_url_cid
 from app.utils import haversine_km,fingerprint
 from app.dates import normalize_published
 from app.scoring import enrich_scores
 from app.telegram_notify import TelegramNotify,listing_message
 from app.rcn import RCNClient, RCN_PARSER_VERSION
+from app.egib import EGIBResolver
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
-LISTING_PARSER_VERSION='1.4.3-locality-registry-v1'
+LISTING_PARSER_VERSION='1.4.6-olx-strict-location-schedule-v1'
+DB_MAINTENANCE_VERSION='1.4.6-olx-hard-filter-clean-v1'
 
 def need(name):
     v=os.getenv(name,'').strip()
@@ -67,35 +71,60 @@ async def run():
         lpv=db.query("SELECT value FROM system_state WHERE key='listing_parser_version'")
         previous_listing_parser=(lpv[0].get('value') if lpv else None)
         parser_migration=previous_listing_parser!=LISTING_PARSER_VERSION
-        print(f'[BOOT] D1 OK | database_new={database_was_new} | scans_today={scans_today} | limit=OFF | purged_bad_sprzedajemy={purged_bad_sprzedajemy} | parser_migration={parser_migration}', flush=True)
+        mv=db.query("SELECT value FROM system_state WHERE key='db_maintenance_version'")
+        previous_maintenance=(mv[0].get('value') if mv else None)
+        maintenance_needed=previous_maintenance!=DB_MAINTENANCE_VERSION
+        print(f'[BOOT] D1 OK | database_new={database_was_new} | scans_today={scans_today} | limit=OFF | purged_bad_sprzedajemy={purged_bad_sprzedajemy} | parser_migration={parser_migration} | db_maintenance={maintenance_needed}', flush=True)
     except Exception as e:
         try: db.set_state('scan_status','error');db.set_state('last_error',f'D1 preflight: {type(e).__name__}: {e}')
         except:pass
         print(f'[FATAL] D1 preflight failed: {type(e).__name__}: {e}', flush=True); raise
 
     tg=TelegramNotify(os.getenv('TELEGRAM_BOT_TOKEN'),os.getenv('TELEGRAM_CHAT_IDS') or os.getenv('TELEGRAM_CHAT_ID'),os.getenv('PANEL_URL',''))
-    scraper=Scraper(cfg); geocoder=Geocoder(db,cfg['center'])
+    scraper=Scraper(cfg); geocoder=Geocoder(db,cfg['center']); egib=EGIBResolver(db,cfg['center'])
     all_recs=[]; accepted=[]; rejected=[]; changes=[]; errs=[]; diagnostics=[]; healthy_sources=[]
     area_cfg=cfg['area']
     enabled=[x for x in cfg['sources'] if x.get('enabled',True)]
 
-    # Parser migration cleanup: immediately deactivate legacy rows that carry explicit
-    # evidence of a foreign county/municipality. This removes previously accepted
-    # false positives without waiting for the normal three-scan expiry window.
+    # Automatic DB maintenance. No manual SQL is required after an upgrade.
+    # We only physically delete legacy rows with HARD textual/admin evidence that they
+    # are outside the configured area. Unresolved rows are left alone because some
+    # legitimate listings are accepted later using coordinates/distance fallback.
     purged_outside_area=0
-    if parser_migration:
+    if maintenance_needed or parser_migration:
         try:
-            existing=db.query("SELECT canonical_url,title,location,description FROM listings WHERE active=1")
-            bad=[]
+            existing=db.query("SELECT canonical_url,source,title,location,description FROM listings")
+            bad=[]; reasons={}
+            hard_prefixes=('explicit-outside','known-gmina-outside-target','conflicting-locality','unknown-locality-in-target-gmina')
             for row in existing:
-                ok,_,why=area_accepts(row,area_cfg,None)
-                if (not ok) and why.startswith(('explicit-outside','known-gmina-outside-target','conflicting-locality','unknown-locality-in-target-gmina')):
+                why=None
+                if row.get('source')=='OLX':
+                    cid=olx_url_cid(row.get('canonical_url') or '')
+                    if cid is not None and cid != 3:
+                        why='olx-non-real-estate-cid'
+                    elif classify_category(row.get('title') or '',row.get('canonical_url') or '',row.get('description') or '',category_hint=None)!='plot':
+                        why='olx-non-plot'
+                if why is None:
+                    ok,_,area_why=area_accepts(row,area_cfg,None)
+                    if (not ok) and str(area_why or '').startswith(hard_prefixes):
+                        why=area_why
+                if why:
                     bad.append(row.get('canonical_url'))
-            purged_outside_area=db.deactivate_urls(bad,'outside-area')
-            if purged_outside_area:
-                print(f'[BOOT] location migration: deactivated {purged_outside_area} rows failing canonical locality validation',flush=True)
+                    reasons[why]=reasons.get(why,0)+1
+            purged_outside_area=db.delete_urls(bad)
+            db.set_states({
+                'db_maintenance_version':DB_MAINTENANCE_VERSION,
+                'db_maintenance_last':{
+                    'version':DB_MAINTENANCE_VERSION,
+                    'checked_rows':len(existing),
+                    'deleted_rows':purged_outside_area,
+                    'reasons':reasons,
+                    'finished_at':datetime.now(timezone.utc).isoformat(),
+                }
+            })
+            print(f'[BOOT] DB maintenance: checked={len(existing)} deleted={purged_outside_area} reasons={reasons}',flush=True)
         except Exception as e:
-            print(f'[BOOT] location migration warning: {type(e).__name__}: {e}',flush=True)
+            print(f'[BOOT] DB maintenance warning: {type(e).__name__}: {e}',flush=True)
 
     # Live state consumed by Mini App + Telegram. The scan still runs on GitHub Actions,
     # but the UI receives source-level progress from D1 every few seconds.
@@ -174,13 +203,28 @@ async def run():
                 if not ok:
                     batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':r.get('distance_km'),'reason':confidence}); continue
             r['area_locality']=locality or r.get('location') or None; r['area_confidence']=confidence
+
+            # If the advert exposes a parcel number, resolve it against the official
+            # GUGiK EGiB WFS. This gives a stable cadastral id and a real parcel centroid.
+            # The village-centre geocode remains only a fallback.
+            r['parcel_id']=None; r['parcel_id_confidence']=None
+            if r.get('parcel_number') and r.get('area_locality'):
+                try:
+                    parcel=egib.lookup(r['area_locality'],r['parcel_number'])
+                    if parcel and parcel.get('parcel_id'):
+                        r['parcel_id']=parcel.get('parcel_id');r['parcel_id_confidence']=parcel.get('confidence') or 'egib-exact'
+                        if parcel.get('lat') is not None and parcel.get('lon') is not None:
+                            r['lat']=float(parcel['lat']);r['lon']=float(parcel['lon'])
+                            r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],r['lat'],r['lon'])
+                except Exception as e:
+                    print(f"[EGIB] lookup warning {r.get('area_locality')} dz. {r.get('parcel_number')}: {type(e).__name__}: {e}",flush=True)
             r['published_at']=normalize_published(r.get('published_text'))
             r['updated_at']=normalize_published(r.get('updated_text'))
             r['fingerprint']=fingerprint(r.get('title',''),r.get('area_locality') or r.get('location',''),r.get('area_m2'),r.get('price'),r.get('parcel_number'))
             r['privacy_score']=None;r['privacy_reasons']=''
             r['deal_label']='liczę po skanie';r['median_comparable']=None;r['market_mean_comparable']=None;r['comparable_count']=0;r['comparison_quality']=''
-            for k in ['rcn_median_ppm','rcn_mean_ppm','rcn_radius_km','rcn_last_date','rcn_last_ppm']:r[k]=None
-            r['rcn_count']=0;r['rcn_months']=int(cfg.get('rcn',{}).get('months',24));r['rcn_quality']='brak danych'
+            for k in ['rcn_median_ppm','rcn_mean_ppm','rcn_radius_km','rcn_last_date','rcn_last_ppm','rcn_history_last_date','rcn_history_last_price','rcn_history_last_ppm','rcn_history_match']:r[k]=None
+            r['rcn_count']=0;r['rcn_months']=int(cfg.get('rcn',{}).get('months',24));r['rcn_quality']='brak danych';r['rcn_history_count']=0
             batch_ok.append(r)
         # A source can occasionally expose the same canonical URL more than once.
         return list({r['canonical_url']:r for r in batch_ok}.values()),batch_rejected
@@ -275,14 +319,14 @@ async def run():
     db.set_state('scan_phase','finalizacja ofert')
     threshold=int(cfg.get('retention',{}).get('missing_scans_before_inactive',3)); deactivated=db.age_missing_for_healthy_sources(healthy_sources,threshold)
 
-    # Real transaction prices from GUGiK RCN WFS; failures never block listing alerts.
-    rcn_rows=[]
+    # Real transaction prices from GUGiK RCN WFS. Benchmark uses a recent window,
+    # while exact parcel purchase history is retained much longer.
+    rcn_rows=[]; rcn_all=[]
     if cfg.get('rcn',{}).get('enabled',True):
         db.set_state('scan_phase','RCN transakcje')
-        rcfg=cfg['rcn']; months=int(rcfg.get('months',24))
-        cutoff=(datetime.now(timezone.utc)-timedelta(days=months*31+60)).isoformat()
-        # Parser v3 fixes RCN units/date/price pairing. Invalidate any cache produced by
-        # an older parser; otherwise bad historical rows would keep poisoning medians.
+        rcfg=cfg['rcn']; months=int(rcfg.get('months',24)); history_months=max(months,int(rcfg.get('history_months',120)))
+        cutoff=(datetime.now(timezone.utc)-relativedelta(months=months)).isoformat()
+        history_cutoff=(datetime.now(timezone.utc)-relativedelta(months=history_months)).isoformat()
         state=db.query("SELECT value FROM system_state WHERE key='rcn_parser_version'")
         current_version=(state[0].get('value') if state else None)
         force_rcn_refresh=current_version!=RCN_PARSER_VERSION
@@ -290,8 +334,6 @@ async def run():
             print(f'[RCN] parser cache migration {current_version!r} -> {RCN_PARSER_VERSION}; czyszczę stare transakcje',flush=True)
             db.execute('DELETE FROM rcn_transactions')
             db.set_state('rcn_parser_version',RCN_PARSER_VERSION)
-        # RCN is historical data; normal refresh remains once per local day, but a
-        # parser-version migration always forces a fresh download.
         last_rcn=db.query("SELECT MAX(fetched_at) last_fetch FROM rcn_transactions")
         last_fetch=(last_rcn[0].get('last_fetch') if last_rcn else None)
         refresh=True
@@ -303,20 +345,26 @@ async def run():
         if force_rcn_refresh: refresh=True
         if refresh:
             try:
+                db.set_state('rcn_status',{'state':'refreshing','benchmark_months':months,'history_months':history_months})
                 rc=RCNClient(cfg['center']['lat'],cfg['center']['lon'],rcfg)
-                print(f"[RCN] odświeżam realne transakcje z ostatnich {months} mies...",flush=True)
-                fresh_rows=await asyncio.to_thread(rc.fetch_recent,months,float(rcfg.get('fetch_radius_km',12)),int(rcfg.get('max_features',2500)))
+                print(f"[RCN] odświeżam realne transakcje; benchmark {months} mies., historia działki {history_months} mies...",flush=True)
+                fresh_rows=await asyncio.to_thread(rc.fetch_recent,history_months,float(rcfg.get('fetch_radius_km',12)),int(rcfg.get('max_features',2500)))
                 print(f'[RCN] pobrane transakcje po filtrze: {len(fresh_rows)}',flush=True)
-                db.upsert_rcn_transactions(fresh_rows); db.purge_old_rcn(cutoff)
+                db.upsert_rcn_transactions(fresh_rows); db.purge_old_rcn(history_cutoff)
+                newest=max((x.get('transaction_date') or '' for x in fresh_rows),default=None)
+                db.set_state('rcn_status',{'state':'ok','fetched':len(fresh_rows),'benchmark_months':months,'history_months':history_months,'newest':newest,'refreshed_at':datetime.now(timezone.utc).isoformat()})
             except Exception as e:
                 errs.append('RCN refresh: '+str(e));print(f'[RCN] warning: {type(e).__name__}: {e}; używam cache D1',flush=True)
+                try:db.set_state('rcn_status',{'state':'error','error':f'{type(e).__name__}: {e}','benchmark_months':months,'history_months':history_months})
+                except Exception:pass
         else:
             print('[RCN] cache z dzisiaj — bez ponownego pobierania WFS',flush=True)
         try:
-            rcn_rows=db.get_rcn_recent(cutoff)
-            print(f'[RCN] transakcje użyte z D1: {len(rcn_rows)}',flush=True)
+            rcn_all=db.get_rcn_recent(history_cutoff)
+            rcn_rows=[x for x in rcn_all if str(x.get('transaction_date') or '')>=cutoff]
+            print(f'[RCN] D1: benchmark {len(rcn_rows)} trans. / historia {len(rcn_all)} trans.',flush=True)
         except Exception as e:
-            errs.append('RCN cache: '+str(e));print(f'[RCN] cache error: {e}',flush=True);rcn_rows=[]
+            errs.append('RCN cache: '+str(e));print(f'[RCN] cache error: {e}',flush=True);rcn_rows=[];rcn_all=[]
 
     db.set_state('scan_phase','analiza cen')
     active=db.all_active(); unique=market_unique(active)
@@ -324,11 +372,15 @@ async def run():
     for r in active:
         enrich_scores(r,unique,cfg)
         # Never retain a stale/broken RCN score if the current scan cannot build a
-        # trustworthy comparable set.
-        for k in ['rcn_median_ppm','rcn_mean_ppm','rcn_radius_km','rcn_last_date','rcn_last_ppm']: r[k]=None
-        r['rcn_count']=0; r['rcn_months']=int(cfg.get('rcn',{}).get('months',24)); r['rcn_quality']='brak wiarygodnych porównań'
+        # trustworthy comparable set. Exact parcel history is a separate signal.
+        for k in ['rcn_median_ppm','rcn_mean_ppm','rcn_radius_km','rcn_last_date','rcn_last_ppm','rcn_history_last_date','rcn_history_last_price','rcn_history_last_ppm','rcn_history_match']: r[k]=None
+        r['rcn_count']=0; r['rcn_months']=int(cfg.get('rcn',{}).get('months',24)); r['rcn_quality']='brak wiarygodnych porównań';r['rcn_history_count']=0
         if rc_an and rcn_rows:
             r.update(rc_an.analyze(r,rcn_rows,int(cfg['rcn'].get('months',24)),int(cfg['rcn'].get('minimum_comparables',3))))
+        if rc_an and rcn_all and (r.get('parcel_id') or r.get('parcel_number')):
+            hist=rc_an.find_parcel_history(r,rcn_all,float(cfg.get('rcn',{}).get('history_fallback_distance_km',2.5)))
+            if hist:
+                last=hist[0];r['rcn_history_count']=len(hist);r['rcn_history_last_date']=last.get('transaction_date');r['rcn_history_last_price']=last.get('price');r['rcn_history_last_ppm']=last.get('price_m2');r['rcn_history_match']=last.get('history_match')
     db.update_scores(active)
     active=db.all_active(); unique=market_unique(active); byurl={r['canonical_url']:r for r in active}
 
@@ -394,7 +446,7 @@ async def run():
     except Exception as e: errs.append('Telegram live final: '+str(e))
     db.set_state('scan_github_run_id','')
     db.set_state('scan_status','idle');db.set_state('scan_phase','gotowe');db.set_state('last_scan_finished_at',finished);db.set_state('last_error','\n'.join(errs[-8:]) if errs else '')
-    (LOGS/'scan_diagnostics.json').write_text(json.dumps({'downloaded':len(all_recs),'accepted':len(accepted),'active':len(unique),'fresh_new':fresh_new,'meaningful_price_changes':meaningful_changes,'rcn_transactions':len(rcn_rows),'location_validation':location_validation,'sources':diagnostics},ensure_ascii=False,indent=2),encoding='utf-8')
+    (LOGS/'scan_diagnostics.json').write_text(json.dumps({'downloaded':len(all_recs),'accepted':len(accepted),'active':len(unique),'fresh_new':fresh_new,'meaningful_price_changes':meaningful_changes,'rcn_transactions_benchmark':len(rcn_rows),'rcn_transactions_history':len(rcn_all),'location_validation':location_validation,'sources':diagnostics},ensure_ascii=False,indent=2),encoding='utf-8')
     (LOGS/'rejected_area.json').write_text(json.dumps(rejected,ensure_ascii=False,indent=2),encoding='utf-8')
     (LOGS/'last_errors.txt').write_text('\n'.join(errs),encoding='utf-8')
     print(summary.replace('<b>','').replace('</b>',''));print(f'Błędy/ostrzeżenia: {len(errs)}')

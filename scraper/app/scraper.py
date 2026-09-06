@@ -12,9 +12,9 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urldefrag, urlencode, urlsplit
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from .utils import canonical_url, clean_text, phone_candidates
+from .utils import canonical_url, clean_text, phone_candidates, asciifold
 from .parser import parse_detail, refine_from_rendered_text
-from .classify import classify_category
+from .classify import classify_category, olx_url_cid
 
 
 _BLOCK_MARKERS = (
@@ -454,14 +454,19 @@ class Scraper:
 
     @classmethod
     def _olx_offer_is_plot(cls, offer: dict) -> bool:
-        """Reject non-land results before the global ``plot`` category hint is used."""
+        """Strict OLX land gate. Free-text locality queries must never define category."""
+        url=str(offer.get('url') or '')
+        cid=olx_url_cid(url)
+        # Public OLX real-estate adverts use CID3. A known different CID is a hard
+        # reject before any description keyword is inspected (e.g. fishing CID767).
+        if cid is not None and cid != 3:
+            return False
         title=clean_text(str(offer.get('title') or ''))
-        desc=clean_text(BeautifulSoup(str(offer.get('description') or ''),'lxml').get_text(' ',strip=True))
         params=' '.join(cls._olx_params_lines(offer))
-        text=clean_text(title+' '+desc+' '+params)
-        # No category hint here on purpose: a query such as "Zakliczyn" can return
-        # cars, houses and services too.
-        return classify_category(title,str(offer.get('url') or ''),text,category_hint=None)=='plot'
+        # Title + structured OLX parameters are trusted. Description is intentionally
+        # excluded: phrases such as "wędkarstwo gruntowe" / "słona woda" caused
+        # the old false positives.
+        return classify_category(title,url,params,category_hint=None)=='plot'
 
     @classmethod
     def _olx_record_from_api(cls, offer: dict) -> dict | None:
@@ -483,13 +488,19 @@ class Scraper:
         location=offer.get('location') or {}
         city=''
         region=''
+        def _loc_name(v):
+            if isinstance(v,dict):
+                return clean_text(str(v.get('name') or v.get('label') or v.get('value') or ''))
+            if isinstance(v,str):
+                return clean_text(v)
+            return ''
         if isinstance(location,dict):
-            c=location.get('city') or {}
-            r=location.get('region') or {}
-            if isinstance(c,dict): city=clean_text(str(c.get('name') or ''))
-            if isinstance(r,dict): region=clean_text(str(r.get('name') or ''))
-        city=city or clean_text(str(offer.get('city') or ''))
-        region=region or clean_text(str(offer.get('region') or ''))
+            city=_loc_name(location.get('city') or location.get('city_name') or location.get('cityName'))
+            region=_loc_name(location.get('region') or location.get('region_name') or location.get('regionName'))
+            if not city:
+                city=_loc_name(location.get('locality') or location.get('place'))
+        city=city or _loc_name(offer.get('city') or offer.get('city_name') or offer.get('cityName'))
+        region=region or _loc_name(offer.get('region') or offer.get('region_name') or offer.get('regionName'))
         price_obj=offer.get('price') or offer.get('price_label') or {}
         price_value=None
         price_label=''
@@ -544,7 +555,17 @@ class Scraper:
             '</div></main></body></html>'
         )
         rec=parse_detail(html,url,'OLX',category_hint='plot')
-        rec['category']=classify_category(rec.get('title') or '',url,rec.get('_body') or '',category_hint='plot')
+        rec['category']=classify_category(rec.get('title') or '',url,' '.join(params_lines),category_hint=None)
+        if city:
+            # A specific OLX API city is authoritative. Generic Zakliczyn is allowed
+            # to be refined by a more specific village in the title (e.g. Lusławice).
+            rec['_olx_structured_city']=city
+            rec['_olx_region']=region
+            if asciifold(city) not in {'zakliczyn','gmina zakliczyn'}:
+                rec['location']=city
+                rec['location_confidence']='olx-api-structured'
+            else:
+                rec['location_confidence']=rec.get('location_confidence') or 'olx-api-generic'
         if photo and not rec.get('image_url'): rec['image_url']=photo
         status=clean_text(str(offer.get('status') or '')).lower()
         if status and status not in {'active','new'}:
@@ -808,11 +829,15 @@ class Scraper:
                             try:
                                 await self._goto(p2,u,scroll=False,reveal_phone=False)
                                 html=await p2.content();actual=p2.url or u
+                                cid=olx_url_cid(actual or u)
+                                if cid is not None and cid != 3:
+                                    return
                                 rec=parse_detail(html,actual,'OLX',category_hint='plot')
                                 try: vis=await p2.locator('body').inner_text(timeout=1500)
                                 except Exception: vis=''
                                 if vis:
                                     rec=refine_from_rendered_text(rec,vis);rec['_body']=(rec.get('_body') or '')+' '+vis[:9000]
+                                rec['category']=classify_category(rec.get('title') or '',actual or u,rec.get('_body') or vis,category_hint=None)
                                 ok,blocked=self._listing_like(rec,vis)
                                 if ok and not blocked and rec.get('category') in self.cfg['filters']['categories']:
                                     cu=rec.get('canonical_url') or u
@@ -838,6 +863,9 @@ class Scraper:
         detail_timeout=float(source.get('detail_timeout_s',18))
         async def fallback_detail(u):
             async with sem:
+                cid=olx_url_cid(u)
+                if cid is not None and cid != 3:
+                    return
                 status,final_url,html,hist=await self._http_get_retry(u,attempts=min(attempts,2))
                 fallback_detail_statuses.append(status)
                 if status!=200 or len(html)<500: return

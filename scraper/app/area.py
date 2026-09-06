@@ -195,6 +195,14 @@ def detect_allowed_locality(location: str | None, title: str | None, description
 
 def area_accepts(record: dict, area_cfg: dict, distance_km: float | None) -> tuple[bool, str | None, str]:
     mode = (area_cfg or {}).get('mode', 'radius')
+    # OLX API exposes a structured city. When it is present, it is stronger than
+    # any word found in description. An unknown foreign city must never be rescued
+    # by a target-village word such as "Słona" appearing in normal prose.
+    if mode == 'locality_whitelist' and record.get('source') == 'OLX' and str(record.get('location_confidence') or '').startswith('olx-api-structured'):
+        allowed,known_gmina,known_outside=_configured_area(area_cfg)
+        structured_hits=_find_names(record.get('location') or '', list(dict.fromkeys(allowed+known_gmina+known_outside)))
+        if not structured_hits and (record.get('location') or '').strip():
+            return False, None, 'olx-structured-location-outside-target'
     if mode != 'locality_whitelist':
         max_d=float(area_cfg.get('fallback_radius_km', 0) or 0)
         if max_d and distance_km is not None:

@@ -209,6 +209,10 @@ function listingText(r, mode = 'new') {
   }
   if (r.phone) lines.push(`☎️ <b>${escapeHtml(r.phone)}</b>`);
   if (r.parcel_number) lines.push(`🗺 Nr działki: <b>${escapeHtml(r.parcel_number)}</b>`);
+  if (Number(r.rcn_history_count||0)>0 && r.rcn_history_last_date) {
+    const basis=String(r.rcn_history_match||'').includes('property-level')?'cena całej nieruchomości obejmującej działkę':'cena tej działki wg RCN';
+    lines.push(`🧾 Historia RCN: <b>${plDateOnly(r.rcn_history_last_date)}</b> • ${money(r.rcn_history_last_price)} • ${ppm(r.rcn_history_last_ppm)} (${escapeHtml(basis)})`);
+  }
   lines.push(`🌐 <b>${escapeHtml(r.source || '?')}</b>`);
   return lines.join('\n');
 }
@@ -281,6 +285,9 @@ async function databaseStats(env) {
     env.DB.prepare(`SELECT COALESCE(NULLIF(area_locality,''),NULLIF(location,''),'?') name, COUNT(*) n
       FROM listings WHERE active=1 AND category='plot' GROUP BY name ORDER BY n DESC LIMIT 20`),
     env.DB.prepare(`SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1`),
+    env.DB.prepare(`SELECT COUNT(*) rcn_history_rows,
+      COUNT(DISTINCT CASE WHEN parcel_id IS NOT NULL AND parcel_id<>'' THEN parcel_id END) rcn_identified_parcels
+      FROM rcn_transactions WHERE julianday(transaction_date)>=julianday('now','-120 months') AND julianday(transaction_date)<=julianday('now','+1 day')`),
   ]);
 
   const first = (r) => (r?.results || [])[0] || {};
@@ -315,6 +322,8 @@ async function databaseStats(env) {
     rcn_last_parcel:rcnLast?.parcel_number||null,
     localities:rows(batch[6]),
     last_scan:first(batch[7]),
+    rcn_history_rows:Number(first(batch[8]).rcn_history_rows||0),
+    rcn_identified_parcels:Number(first(batch[8]).rcn_identified_parcels||0),
   };
 }
 
@@ -324,7 +333,7 @@ function parseDiag(last) {
 
 function nextScanLabel() {
   const hour=Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Warsaw',hour:'2-digit',hour12:false}).format(new Date()));
-  if(hour<9)return 'dzisiaj 09:00'; if(hour<20)return 'dzisiaj 20:00'; return 'jutro 09:00';
+  const m=now.getMinutes(); if(hour<9 || (hour===9&&m<7))return 'dzisiaj 09:07'; if(hour<20 || (hour===20&&m<7))return 'dzisiaj 20:07'; return 'jutro 09:07';
 }
 
 async function botStatus(env) {
@@ -361,6 +370,8 @@ function statusLongText(s) {
   const bad=(s.diagnostics||[]).filter(x=>!x.healthy),good=(s.diagnostics||[]).filter(x=>x.healthy);
   const sourceLines=(s.diagnostics||[]).map(x=>`${x.healthy?'✅':'⚠️'} ${escapeHtml(x.source||'?')}: rekordy ${x.records??0}, linki ${x.discovered_links??0}, detail ${x.detail_pages_ok??0}${x.blocked?` • blokady ${x.blocked}`:''}${x.fatal?` • ${escapeHtml(x.fatal)}`:''}`);
   let locValidation={}; try{locValidation=JSON.parse(s.system?.location_validation?.value||'{}')||{};}catch{}
+  let rcnState={}; try{rcnState=JSON.parse(s.system?.rcn_status?.value||'{}')||{};}catch{}
+  let dbMaintenance={}; try{dbMaintenance=JSON.parse(s.system?.db_maintenance_last?.value||'{}')||{};}catch{}
   const locReasons=Object.entries(locValidation.reasons||{}).sort((a,b)=>Number(b[1])-Number(a[1])).slice(0,4).map(([k,v])=>`${escapeHtml(k)} ${v}`).join(' • ');
   return [`📋 <b>PEŁNY STATUS PROPERTY RADAR</b>`,``,
     `🤖 Stan: <b>${escapeHtml(s.scan_state||'idle')}</b>`,
@@ -374,6 +385,8 @@ function statusLongText(s) {
     ``,`📦 Ostatni skan: pobrano ${s.last_scan?.downloaded_records??'—'} • przyjęto ${s.last_scan?.accepted_records??'—'} • nowe ${s.last_scan?.new_count??'—'} • zmiany cen ${s.last_scan?.price_change_count??'—'}`,
     `🚫 Odrzucone ${s.last_scan?.rejected_count??'—'} • wygaszone ${s.last_scan?.deactivated_count??'—'}`,
     locValidation.registry_version?`🧭 Walidacja lokalizacji: <b>${escapeHtml(locValidation.registry_version)}</b>${locReasons?` • ${locReasons}`:''}`:'',
+    dbMaintenance.version?`🧹 Auto-porządki D1: sprawdzono ${dbMaintenance.checked_rows||0} • usunięto <b>${dbMaintenance.deleted_rows||0}</b>`:'',
+    rcnState.state?`🏛 RCN: <b>${escapeHtml(rcnState.state)}</b>${rcnState.fetched!=null?` • pobrano ${rcnState.fetched}`:''}${rcnState.history_months?` • historia ${rcnState.history_months} mies.`:''}${rcnState.error?` • ${escapeHtml(rcnState.error)}`:''}`:'',
     ``,`⏰ Następny automatyczny: <b>${s.next_scan}</b>`,`🧯 Ostatni błąd: ${escapeHtml(s.system?.last_error?.value||'brak')}`].filter(Boolean).join('\n');
 }
 
@@ -392,7 +405,8 @@ function databaseStatusText(s) {
     ``,
     `🏛 <b>REALNE TRANSAKCJE RCN — 24 mies.</b>`,
     `mediana: <b>${s.rcn_median_ppm==null?'—':ppm(s.rcn_median_ppm)}</b> • średnia: ${s.rcn_mean_ppm==null?'—':ppm(s.rcn_mean_ppm)}`,
-    `transakcje: ${s.rcn_count||0} • ostatnia: ${plDateOnly(s.rcn_last_date)}${s.rcn_last_ppm?` • ${ppm(s.rcn_last_ppm)}`:''}`,
+    `transakcje benchmarkowe: ${s.rcn_count||0} • ostatnia: ${plDateOnly(s.rcn_last_date)}${s.rcn_last_ppm?` • ${ppm(s.rcn_last_ppm)}`:''}`,
+    `archiwum RCN do historii działek: ${s.rcn_history_rows||0} rekordów • działki z ID EGiB: ${s.rcn_identified_parcels||0}`,
     ``,
     `📍 <b>AKTYWNE WG MIEJSCOWOŚCI</b>`,loc].join('\n');
 }
@@ -410,13 +424,44 @@ function haversineKm(lat1,lon1,lat2,lon2){
 
 async function nearbyRcn(env,listing){
   if(!listing?.lat||!listing?.lon)return [];
-  const rows=(await env.DB.prepare(`SELECT transaction_date,price,area_m2,price_m2,parcel_number,mpzp,use_type,address,lat,lon FROM rcn_transactions WHERE lat IS NOT NULL AND lon IS NOT NULL AND price_m2 BETWEEN 0.5 AND 3000 AND julianday(transaction_date)>=julianday('now','-24 months') AND julianday(transaction_date)<=julianday('now','+1 day') ORDER BY transaction_date DESC LIMIT 2500`).all()).results||[];
+  const rows=(await env.DB.prepare(`SELECT transaction_date,price,area_m2,price_m2,parcel_number,parcel_id,transaction_id,price_basis,mpzp,use_type,address,lat,lon FROM rcn_transactions WHERE lat IS NOT NULL AND lon IS NOT NULL AND price_m2 BETWEEN 0.5 AND 3000 AND julianday(transaction_date)>=julianday('now','-24 months') AND julianday(transaction_date)<=julianday('now','+1 day') ORDER BY transaction_date DESC LIMIT 2500`).all()).results||[];
   const targetArea=Number(listing.area_m2||0),limitRadius=Number(listing.rcn_radius_km||10);
-  return rows.map(t=>({...t,distance_km:haversineKm(listing.lat,listing.lon,t.lat,t.lon)})).filter(t=>{
+  const filtered=rows.map(t=>({...t,distance_km:haversineKm(listing.lat,listing.lon,t.lat,t.lon)})).filter(t=>{
     if(t.distance_km>limitRadius)return false;
     if(targetArea&&t.area_m2){const ratio=Number(t.area_m2)/targetArea;if(ratio<0.5||ratio>2)return false;}
     return true;
-  }).sort((a,b)=>new Date(b.transaction_date||0)-new Date(a.transaction_date||0)).slice(0,8);
+  }).sort((a,b)=>new Date(b.transaction_date||0)-new Date(a.transaction_date||0));
+  // Whole-property RCN transactions can be exposed once for each member parcel.
+  // Show/count them only once in nearby comparables.
+  const seen=new Set(),unique=[];
+  for(const t of filtered){
+    const k=String(t.price_basis||'')==='property'?(t.transaction_id||`${t.transaction_date}|${t.price}|${t.area_m2}`):(`parcel|${t.transaction_id||''}|${t.parcel_id||t.parcel_number||''}|${t.transaction_date}|${t.price}`);
+    if(seen.has(k))continue;seen.add(k);unique.push(t);
+  }
+  return unique.slice(0,8);
+}
+
+function normParcel(v){const m=String(v||'').replace(/\s+/g,'').match(/(\d{1,7}(?:\/\d{1,7})?)/);return m?m[1]:'';}
+function foldLoc(v){return String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ł/g,'l');}
+
+async function parcelHistoryRcn(env,listing){
+  const pid=String(listing?.parcel_id||'').trim(),pn=normParcel(listing?.parcel_number);
+  if(!pid&&!pn)return [];
+  let rows=[];
+  if(pid){
+    rows=(await env.DB.prepare(`SELECT transaction_date,price,area_m2,price_m2,parcel_number,parcel_id,transaction_id,price_basis,mpzp,use_type,address,lat,lon
+      FROM rcn_transactions WHERE parcel_id=? AND julianday(transaction_date)>=julianday('now','-120 months') AND julianday(transaction_date)<=julianday('now','+1 day') ORDER BY transaction_date DESC LIMIT 40`).bind(pid).all()).results||[];
+    return rows.map(t=>({...t,history_match:String(t.price_basis||'')==='parcel'?'egib-id-exact':'egib-id-property-level'}));
+  }
+  rows=(await env.DB.prepare(`SELECT transaction_date,price,area_m2,price_m2,parcel_number,parcel_id,transaction_id,price_basis,mpzp,use_type,address,lat,lon
+    FROM rcn_transactions WHERE parcel_number=? AND julianday(transaction_date)>=julianday('now','-120 months') AND julianday(transaction_date)<=julianday('now','+1 day') ORDER BY transaction_date DESC LIMIT 100`).bind(pn).all()).results||[];
+  const loc=foldLoc(listing.area_locality||listing.location),targetArea=Number(listing.area_m2||0);
+  return rows.filter(t=>{
+    if(normParcel(t.parcel_number)!==pn)return false;
+    const addr=foldLoc(t.address),locOk=!!(loc&&addr&&addr.includes(loc));
+    let areaOk=false;if(targetArea&&t.area_m2){const ratio=Number(t.area_m2)/targetArea;areaOk=ratio>=0.70&&ratio<=1.35;}
+    return locOk&&areaOk;
+  }).map(t=>({...t,history_match:'parcel-number+locality+area'})).slice(0,20);
 }
 
 async function dispatchScan(env) {
@@ -557,7 +602,7 @@ Twój user_id: <code>${escapeHtml(userId)}</code>`,{inline_keyboard:[]});return 
     } catch(e) { console.warn('setChatMenuButton repair failed', e?.message||e); }
     await send(`🏡 <b>PROPERTY RADAR</b>
 Alerty tylko dla faktycznie nowych publikacji i istotnych zmian ceny.
-Skan automatyczny: <b>09:00 / 20:00</b>.`,mainMenu(origin,role));
+Skan automatyczny: <b>09:07 / 20:07</b>.`,mainMenu(origin,role));
     return new Response('ok');
   }
   if(callback){
@@ -619,7 +664,7 @@ user_id: <code>${escapeHtml(userId)}</code>`);
   else if((text==='/stopscan'||text==='/stop')&&role==='admin'){await send('⏹ <b>Zatrzymuję skan…</b>');const d=await stopScan(env);await send(d.ok?`✅ Skan zatrzymany. Run: <code>${d.run_id}</code>`:`⚠️ ${escapeHtml(d.message)}`);}
   else await send(`🏡 <b>PROPERTY RADAR</b>
 Alerty tylko dla faktycznie nowych publikacji i istotnych zmian ceny.
-Skan automatyczny: <b>09:00 / 20:00</b>.`,mainMenu(origin,role));
+Skan automatyczny: <b>09:07 / 20:07</b>.`,mainMenu(origin,role));
   return new Response('ok');
 }
 
@@ -665,9 +710,10 @@ async function handleApi(req, env, url) {
   }
   const mr = url.pathname.match(/^\/api\/listing\/(\d+)\/rcn$/);
   if (mr) {
-    const listing=await env.DB.prepare(`SELECT id,lat,lon,area_m2,rcn_radius_km FROM listings WHERE id=?`).bind(Number(mr[1])).first();
+    const listing=await env.DB.prepare(`SELECT id,lat,lon,area_m2,area_locality,location,parcel_number,parcel_id,parcel_id_confidence,rcn_radius_km FROM listings WHERE id=?`).bind(Number(mr[1])).first();
     if(!listing)return json({error:'listing not found'},404);
-    return json({transactions:await nearbyRcn(env,listing)});
+    const [transactions,parcel_history]=await Promise.all([nearbyRcn(env,listing),parcelHistoryRcn(env,listing)]);
+    return json({transactions,parcel_history});
   }
 
   if (url.pathname === '/api/scan' && req.method === 'POST') {

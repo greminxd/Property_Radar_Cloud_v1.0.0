@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json,os
+import json,os,sys
 from pathlib import Path
 import requests
 
@@ -42,9 +42,10 @@ print(f'[OK] D1 tables/base schema: {len(table_stmts)} statements')
 
 # SQLite/D1 CREATE TABLE IF NOT EXISTS does not add new columns to an old table.
 required={
- 'updated_text':'TEXT','updated_at':'TEXT','source_status':"TEXT DEFAULT 'active'",'archive_reason':'TEXT',
+ 'parcel_id':'TEXT','parcel_id_confidence':'TEXT','updated_text':'TEXT','updated_at':'TEXT','source_status':"TEXT DEFAULT 'active'",'archive_reason':'TEXT',
  'market_mean_comparable':'REAL','rcn_median_ppm':'REAL','rcn_mean_ppm':'REAL','rcn_count':'INTEGER DEFAULT 0',
  'rcn_radius_km':'REAL','rcn_months':'INTEGER','rcn_last_date':'TEXT','rcn_last_ppm':'REAL','rcn_quality':'TEXT',
+ 'rcn_history_count':'INTEGER DEFAULT 0','rcn_history_last_date':'TEXT','rcn_history_last_price':'REAL','rcn_history_last_ppm':'REAL','rcn_history_match':'TEXT',
  'price_alert_reference':'REAL','last_meaningful_price_change_at':'TEXT','last_price_old':'REAL','last_price_new':'REAL','last_price_change_pct':'REAL'
 }
 cols={r['name'] for r in d1('PRAGMA table_info(listings)')}
@@ -53,10 +54,60 @@ for name,typ in required.items():
         d1(f'ALTER TABLE listings ADD COLUMN {name} {typ}')
         print('[MIGRATE] listings +',name)
 
+rcn_required={
+ 'parcel_id':'TEXT','transaction_id':'TEXT','price_basis':'TEXT'
+}
+rcn_cols={r['name'] for r in d1('PRAGMA table_info(rcn_transactions)')}
+for name,typ in rcn_required.items():
+    if name not in rcn_cols:
+        d1(f'ALTER TABLE rcn_transactions ADD COLUMN {name} {typ}')
+        print('[MIGRATE] rcn_transactions +',name)
+
 if index_stmts:
     r=requests.post(url,headers=headers,json={'batch':[{'sql':s,'params':[]} for s in index_stmts]},timeout=90);r.raise_for_status();data=r.json()
     if not data.get('success'):raise SystemExit('D1 index init failed: '+json.dumps(data,ensure_ascii=False)[:2000])
 print(f'[OK] D1 indexes: {len(index_stmts)} statements')
+
+# Automatic one-time cleanup of legacy false positives. This is intentionally
+# conservative: only rows with hard textual/admin evidence of a foreign location
+# are physically removed. Users never need to paste SQL into D1 manually.
+try:
+    sys.path.insert(0,str(ROOT/'scraper'))
+    from app.area import area_accepts
+    from app.classify import classify_category, olx_url_cid
+    cfg=json.loads((ROOT/'scraper'/'config.json').read_text(encoding='utf-8'))
+    area_cfg=cfg.get('area') or {}
+    rows=d1('SELECT id,canonical_url,source,title,location,description FROM listings')
+    hard_prefixes=('explicit-outside','known-gmina-outside-target','conflicting-locality','unknown-locality-in-target-gmina')
+    bad=[]; reasons={}
+    for row in rows:
+        why=None
+        if row.get('source')=='OLX':
+            cid=olx_url_cid(row.get('canonical_url') or '')
+            if cid is not None and cid != 3:
+                why='olx-non-real-estate-cid'
+            elif classify_category(row.get('title') or '',row.get('canonical_url') or '',row.get('description') or '',category_hint=None)!='plot':
+                why='olx-non-plot'
+        if why is None:
+            ok,_,area_why=area_accepts(row,area_cfg,None)
+            if (not ok) and str(area_why or '').startswith(hard_prefixes):
+                why=area_why
+        if why:
+            bad.append(int(row['id']))
+            reasons[why]=reasons.get(why,0)+1
+    for i in range(0,len(bad),40):
+        chunk=bad[i:i+40]; qs=','.join('?' for _ in chunk)
+        d1(f'DELETE FROM price_history WHERE listing_id IN ({qs})',chunk)
+        d1(f'DELETE FROM listings WHERE id IN ({qs})',chunk)
+    maintenance='1.4.6-olx-hard-filter-clean-v1'
+    now=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+    d1("INSERT INTO system_state(key,value,updated_at) VALUES('db_maintenance_version',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",[maintenance,now])
+    d1("INSERT INTO system_state(key,value,updated_at) VALUES('db_maintenance_last',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",[json.dumps({'version':maintenance,'checked_rows':len(rows),'deleted_rows':len(bad),'reasons':reasons,'finished_at':now},ensure_ascii=False),now])
+    print(f'[OK] D1 auto-clean: checked={len(rows)} deleted={len(bad)} reasons={reasons}')
+except Exception as e:
+    # Setup should not become unavailable because cleanup diagnostics failed; the
+    # scanner repeats the same maintenance automatically on its first run.
+    print(f'[WARN] D1 auto-clean deferred to first scan: {type(e).__name__}: {e}')
 
 base=f'https://api.telegram.org/bot{bot}/'
 def tg(method,payload,*,fatal=True):

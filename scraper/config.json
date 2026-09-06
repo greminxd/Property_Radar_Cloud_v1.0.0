@@ -161,7 +161,8 @@
       "fallback_detail_pages": 20,
       "browser_session_fallback": true,
       "browser_fallback_detail_pages": 15,
-      "query_from_area_registry": true
+      "query_from_area_registry": true,
+      "api_category_id": 3
     },
     {
       "name": "Morizon",
@@ -271,7 +272,9 @@
     "months": 24,
     "fetch_radius_km": 12,
     "max_features": 2500,
-    "minimum_comparables": 3
+    "minimum_comparables": 3,
+    "history_months": 120,
+    "history_fallback_distance_km": 2.5
   },
   "ui": {
     "default_published_days": 30

@@ -16,11 +16,17 @@ TYPE_RULES = [
 
 
 
+def olx_url_cid(url: str) -> int | None:
+    """Return the category id embedded in a public OLX advert URL (``-CID3-``)."""
+    m=re.search(r'-CID(\d+)(?:-|$)', url or '', re.I)
+    return int(m.group(1)) if m else None
+
+
 def classify_category(title: str, url: str, text: str, category_hint: str | None = None) -> str:
     """Property Radar monitors LAND ONLY. Strong title/URL signals win.
 
-    Garage/parking listings and houses/flats/commercial objects are deliberately
-    classified as ``other`` so they can never leak into alerts or Mini App.
+    Generic words must not be enough. In particular ``grunt`` used to match
+    ``gruntowy`` in fishing adverts, which could turn a reel into a land plot.
     """
     t=asciifold(title or '')
     u=asciifold(url or '')
@@ -28,19 +34,38 @@ def classify_category(title: str, url: str, text: str, category_hint: str | None
         return "other"
     if any(k in u for k in ["/garaz", "/garaze", "garaz-na-sprzedaz", "garaze-parkingi"]):
         return "other"
+
+    title_land=bool(
+        re.search(r'\bdzialk[a-z]*\b',t)
+        or re.search(r'\bparcela(?:\b|[a-z])',t)
+        or re.search(r'\bgrunt\b(?:\s+(?:roln|budowl|inwest|lesn|uslug|na\s+sprzedaz))?',t)
+        or re.search(r'\bteren\b.{0,28}\bbudowl',t)
+        or 'pole na sprzedaz' in t
+    )
     if re.search(r"(?:^|[^a-z0-9])(dom|domek|willa|mieszkanie|apartament|lokal|kamienica|pensjonat|hala|magazyn)(?:[^a-z0-9]|$)", t):
-        # Exception: a land listing may say "działka z domem"; explicit land words win.
-        if not any(k in t for k in ["dzialka", "grunt", "parcela", "pole na sprzedaz"]):
+        if not title_land:
             return "other"
-    if any(k in t for k in ["dzialka", "grunt", "parcela", "pole na sprzedaz"]):
+    if title_land:
         return "plot"
     if any(k in u for k in ["/dzialka", "/dzialki", "dzialka-na-sprzedaz", "dzialki-grunty"]):
         return "plot"
+
+    # Text fallback uses land-specific phrases only. Bare ``grunt`` is deliberately
+    # forbidden because it is common in fishing/agricultural-product vocabulary.
+    x=asciifold((text or '')[:4500])
+    strong_text_signals=[
+        "powierzchnia dzialki", "powierzchnia gruntu", "numer dzialki",
+        "dzialka budowl", "dzialka rol", "dzialka lesn", "dzialki budowl",
+        "grunt roln", "grunt budowl", "grunt inwest", "grunt lesn",
+        "rodzaj dzialki", "warunki zabudowy", "miejscowy plan zagospodarowania",
+    ]
+    if any(k in x for k in strong_text_signals):
+        return "plot"
+    # MPZP by itself is strong on property portals but should not rescue an arbitrary
+    # marketplace item unless the caller explicitly knows it came from a plot category.
     if category_hint == "plot":
         return "plot"
-    x=asciifold((text or '')[:4500])
-    plot_score=sum(k in x for k in ["powierzchnia dzialki", "dzialka budowl", "dzialka rol", "grunt", "warunki zabudowy", "mpzp", "numer dzialki"])
-    return "plot" if plot_score >= 1 else "other"
+    return "other"
 
 
 def classify_plot_type(title: str, text: str) -> str:

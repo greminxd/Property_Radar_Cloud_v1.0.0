@@ -1,6 +1,13 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const tg = window.Telegram?.WebApp;
+try {
+  tg?.ready?.();
+  tg?.expand?.();
+  tg?.setHeaderColor?.('#f5f5f7');
+  tg?.setBackgroundColor?.('#f5f5f7');
+  tg?.setBottomBarColor?.('#f5f5f7');
+} catch {}
 let listings = [];
 let stats = {};
 let quick = '30d';
@@ -104,7 +111,7 @@ function renderStats(){
   const rcnGlobalOk=Number(stats.rcn_count||0)>=3 && Number(stats.rcn_median_ppm)>=0.5 && Number(stats.rcn_median_ppm)<=3000;
   $('#rcnMedian').textContent=rcnGlobalOk?fmtPpm(stats.rcn_median_ppm):'—';
   $('#rcnMean').textContent=rcnGlobalOk?fmtPpm(stats.rcn_mean_ppm):'—';
-  $('#rcnMeta').textContent=`Transakcje: ${stats.rcn_count||0} • ostatnia: ${dateOnly(stats.rcn_last_date)}${stats.rcn_last_ppm?` • ${fmtPpm(stats.rcn_last_ppm)}`:''} • okno: 24 miesiące`;
+  $('#rcnMeta').textContent=`Benchmark 24 mies.: ${stats.rcn_count||0} • archiwum historii: ${stats.rcn_history_rows||0} • działki z ID EGiB: ${stats.rcn_identified_parcels||0} • ostatnia: ${dateOnly(stats.rcn_last_date)}${stats.rcn_last_ppm?` • ${fmtPpm(stats.rcn_last_ppm)}`:''}`;
   $('#statActive').textContent=stats.plots||0;
   $('#stat30').textContent=stats.published30||0;
   $('#statArchived').textContent=stats.archived||0;
@@ -289,15 +296,17 @@ function card(r){
   const badges=[
     archived?badge('ARCHIWALNA','warn'):'', badge(r.plot_type||'nieustalona','blue'), badge(r.planning_status||'nieustalone'),
     badge(sizeBadge(r.area_m2)),r.area_warning?badge('⚠ metraż','warn'):'',r.phone?badge('☎ telefon','good'):'',r.parcel_number?badge('🗺 nr działki','good'):'',
+    r.parcel_id?badge('🎯 EGiB','good'):'',Number(r.rcn_history_count||0)>0?badge(`🧾 RCN historia ${r.rcn_history_count}`,'hot'):'',
     r.last_meaningful_price_change_at?badge('📉 zmiana ceny','hot'):''
   ].join('');
   return `<article class="card ${archived?'archived-card':''}" data-id="${r.id}">
-    <div class="photo">${img}<div class="photo-fallback">${isPlot?'🌱':'🚗'}</div></div>
+    <div class="photo">${img}<div class="photo-fallback">${isPlot?'🌱':'🚗'}</div><span class="source-tag">${esc(r.source||'?')}</span></div>
     <div class="card-body"><div class="card-top"><div class="title">${esc(r.title||'(bez tytułu)')}</div><div class="distance">${distance}</div></div>
-    <div class="location">📍 ${esc(loc(r))} · ${esc(r.source||'?')}</div>
+    <div class="location">📍 ${esc(loc(r))}</div>
     <div class="numbers"><div class="num"><span>Cena</span><b>${fmtMoney(r.price)}</b></div><div class="num"><span>Powierzchnia</span><b>${fmtArea(r.area_m2)}</b></div><div class="num"><span>Cena / m²</span><b>${fmtPpm(r.price_m2)}</b></div></div>
     <div class="badges">${badges}</div>
     ${isPlot?`<div class="market-compact"><span>📢 m² vs ogłoszenia <b>${pctText(marketDeltaPct(r))}</b><small>${r.median_comparable?`${fmtPpm(r.price_m2)} vs ${fmtPpm(r.median_comparable)}`:'brak benchmarku'}</small></span><span>🏛 m² vs RCN <b>${pctText(rcnDeltaPct(r))}</b><small>${trustedRcn(r)?`${fmtPpm(r.price_m2)} vs ${fmtPpm(r.rcn_median_ppm)}`:'brak benchmarku'}</small></span></div>`:''}
+    ${Number(r.rcn_history_count||0)>0?`<div class="archive-note">🧾 RCN: ta działka ma historię transakcyjną • ostatnio ${dateOnly(r.rcn_history_last_date)} • ${fmtMoney(r.rcn_history_last_price)}${r.rcn_history_last_ppm?` • ${fmtPpm(r.rcn_history_last_ppm)}`:''}</div>`:''}
     <div class="meta-line"><span>🗓 dodane na portalu: <b>${dateOnly(r.published_at)}</b></span>${r.updated_at?`<span>↻ aktualizacja: ${dateOnly(r.updated_at)}</span>`:''}<span>📡 Radar zobaczył: ${dateOnly(r.first_seen)}</span></div>
     ${archived&&r.archive_reason?`<div class="archive-note">⚠ ${esc(r.archive_reason)}</div>`:''}
     <div class="card-actions"><a class="open-btn" href="${esc(r.canonical_url)}" target="_blank" rel="noopener">Otwórz ogłoszenie</a>${phone}<button class="detail-btn" data-detail="${r.id}">Szczegóły</button></div>
@@ -322,17 +331,18 @@ function render(){
   $$('[data-detail]').forEach(b=>b.addEventListener('click',()=>showDetail(+b.dataset.detail)));
 }
 async function showDetail(id){
-  const r=listings.find(x=>+x.id===id); if(!r)return; let history=[],rcnTx=[];
-  try{const [h,t]=await Promise.all([api(`/api/listing/${id}/history`),api(`/api/listing/${id}/rcn`)]);history=h.history||[];rcnTx=t.transactions||[]}catch{try{history=(await api(`/api/listing/${id}/history`)).history||[]}catch{}}
+  const r=listings.find(x=>+x.id===id); if(!r)return; let history=[],rcnTx=[],parcelHistory=[];
+  try{const [h,t]=await Promise.all([api(`/api/listing/${id}/history`),api(`/api/listing/${id}/rcn`)]);history=h.history||[];rcnTx=t.transactions||[];parcelHistory=t.parcel_history||[]}catch{try{history=(await api(`/api/listing/${id}/history`)).history||[]}catch{}}
   const marketDelta=marketDeltaPct(r),rcnDelta=rcnDeltaPct(r);
   $('#detailBody').innerHTML=`<div class="detail-content"><h2>${esc(r.title||'Oferta')}</h2><div class="location">📍 ${esc(loc(r))} · ${r.distance_km==null?'?':(+r.distance_km).toFixed(1)} km · ${esc(r.source)}</div>
     <div class="detail-grid">
-      ${[['Cena',fmtMoney(r.price)],['Powierzchnia',fmtArea(r.area_m2)],['Cena/m²',fmtPpm(r.price_m2)],['Status',isArchived(r)?'archiwalna / nieaktywna':'aktywna'],['Typ',r.plot_type||'nieustalona'],['Plan / WZ',r.planning_status||'nieustalone'],['Nr działki',r.parcel_number||'—'],['Telefon',r.phone||'brak / ukryty'],['Pierwotnie dodane',dateOnly(r.published_at)],['Ostatnia aktualizacja',dateOnly(r.updated_at)],['Radar pierwszy raz',dateTime(r.first_seen)],['Portal',r.source||'—']].map(([a,b])=>`<div class="detail-item"><span>${esc(a)}</span><b>${esc(b)}</b></div>`).join('')}
+      ${[['Cena',fmtMoney(r.price)],['Powierzchnia',fmtArea(r.area_m2)],['Cena/m²',fmtPpm(r.price_m2)],['Status',isArchived(r)?'archiwalna / nieaktywna':'aktywna'],['Typ',r.plot_type||'nieustalona'],['Plan / WZ',r.planning_status||'nieustalone'],['Nr działki',r.parcel_number||'—'],['ID działki EGiB',r.parcel_id||'—'],['Telefon',r.phone||'brak / ukryty'],['Pierwotnie dodane',dateOnly(r.published_at)],['Ostatnia aktualizacja',dateOnly(r.updated_at)],['Radar pierwszy raz',dateTime(r.first_seen)],['Portal',r.source||'—']].map(([a,b])=>`<div class="detail-item"><span>${esc(a)}</span><b>${esc(b)}</b></div>`).join('')}
     </div>
     ${r.area_warning?`<div class="badge warn" style="margin-top:12px">${esc(r.area_warning)}</div>`:''}
     ${isArchived(r)&&r.archive_reason?`<div class="archive-note">⚠ ${esc(r.archive_reason)}</div>`:''}
     ${r.category==='plot'?`<h3 class="detail-section-title">Porównanie ceny za m²</h3>${analyticsHtml(r)}<div class="comparison-summary"><b>Cena/m² oferty vs mediana ogłoszeń:</b> ${pctText(marketDelta)} (${fmtPpm(r.price_m2)} vs ${fmtPpm(r.median_comparable)})<br><b>Cena/m² oferty vs mediana transakcji RCN:</b> ${pctText(rcnDelta)} (${fmtPpm(r.price_m2)} vs ${trustedRcn(r)?fmtPpm(r.rcn_median_ppm):'—'})</div>
-      <div class="history rcn-history"><h3>Ostatnie porównywalne transakcje w okolicy</h3>${rcnTx.length?rcnTx.map(t=>`<div class="tx-row"><div><b>${dateOnly(t.transaction_date)}</b><span>${t.parcel_number?`dz. ${esc(t.parcel_number)} • `:''}${fmtArea(t.area_m2)} • ${(+t.distance_km).toFixed(1)} km</span></div><strong>${fmtPpm(t.price_m2)}</strong></div>`).join(''):'<div class="muted">Brak porównywalnych transakcji RCN dla tej lokalizacji/metrażu.</div>'}</div>`:''}
+      <div class="history rcn-history"><h3>🧾 Historia transakcyjna tej działki (RCN)</h3>${parcelHistory.length?parcelHistory.map(t=>{const whole=String(t.history_match||'').includes('property-level');return `<div class="tx-row"><div><b>${dateOnly(t.transaction_date)}</b><span>dz. ${esc(t.parcel_number||r.parcel_number||'?')} • ${fmtArea(t.area_m2)}${whole?' • ⚠ cena całej nieruchomości obejmującej działkę':' • cena działki'}</span></div><strong>${fmtMoney(t.price)}<small style="display:block">${fmtPpm(t.price_m2)}</small></strong></div>`}).join(''):(r.parcel_number?'<div class="muted">RCN nie zawiera wiarygodnie dopasowanej wcześniejszej transakcji tej działki.</div>':'<div class="muted">Brak numeru działki w ogłoszeniu — nie można bezpiecznie sprawdzić historii konkretnej parceli.</div>')}</div>
+      <div class="history rcn-history"><h3>Porównywalne transakcje w okolicy</h3>${rcnTx.length?rcnTx.map(t=>`<div class="tx-row"><div><b>${dateOnly(t.transaction_date)}</b><span>${t.parcel_number?`dz. ${esc(t.parcel_number)} • `:''}${fmtArea(t.area_m2)} • ${(+t.distance_km).toFixed(1)} km</span></div><strong>${fmtPpm(t.price_m2)}</strong></div>`).join(''):'<div class="muted">Brak porównywalnych transakcji RCN dla tej lokalizacji/metrażu.</div>'}</div>`:''}
     <div class="description">${esc(r.description||'Brak opisu w parserze.')}</div>
     <div class="history"><h3>Historia ceny w Radarze</h3>${history.length?history.map(x=>`<div class="history-row"><span>${dateTime(x.seen_at)}</span><b>${fmtMoney(x.price)}</b></div>`).join(''):'<div class="muted">Brak zarejestrowanych zmian ceny.</div>'}</div>
     <div class="card-actions"><a class="open-btn" href="${esc(r.canonical_url)}" target="_blank" rel="noopener">Otwórz źródło</a>${r.phone?`<a class="phone-btn" href="tel:${esc(r.phone)}">☎ ${esc(r.phone)}</a>`:''}</div></div>`;

@@ -231,3 +231,31 @@ foreign_html='<html><head><meta property="og:title" content="Na sprzedaż las o 
 foreign=parse_detail(foreign_html,'https://sprzedajemy.pl/test-nr123','Sprzedajemy','plot')
 assert foreign['location']=='Olcha' and foreign['location_confidence']=='title-county',foreign
 print('SELFTEST OK v1.4.2 strict location guard')
+
+# v1.4.3: canonical locality registry shared by parser, area validation and OLX discovery.
+from app.area import registry_names, locality_record
+_registry=registry_names()
+assert len(_registry)==27, _registry
+for _name in ['Granice','Kanada','Podlesie','Bieśnik','Zdonia','Zakliczyn']:
+    assert _name in _registry, (_name,_registry)
+assert locality_record('Biesnik')['name']=='Bieśnik'
+assert locality_record('Palesnicy')['name']=='Paleśnica'
+
+area_cfg=json.load(open('config.json',encoding='utf-8'))['area']
+# A portal may report generic Zakliczyn while the title contains the real village.
+_specific={'location':'Zakliczyn','title':'Działka Lusławice 3600 m²','description':''}
+ok,loc,why=area_accepts(_specific,area_cfg,None)
+assert ok and loc=='Lusławice' and why=='title',(ok,loc,why)
+# Complete gmina registry knows this place, but it is outside the configured radar scope.
+_gmina_only={'location':'Granice','title':'Działka Granice, gmina Zakliczyn','description':''}
+ok,loc,why=area_accepts(_gmina_only,area_cfg,None)
+assert not ok and loc is None and why=='known-gmina-outside-target',(ok,loc,why)
+# Foreign administrative evidence remains a hard reject even if a target word appears elsewhere.
+_conflict={'location':'Zakliczyn','title':'Działka Zakliczyn','description':'Olcha, powiat żuromiński'}
+ok,loc,why=area_accepts(_conflict,area_cfg,1.0)
+assert not ok and why=='explicit-outside-county',(ok,loc,why)
+# OLX query coverage must mirror the accepted area list.
+_cfg=json.load(open('config.json',encoding='utf-8'))
+_olx=next(x for x in _cfg['sources'] if x['name']=='OLX')
+assert set(_olx['api_queries'])==set(area_cfg['primary_localities']+area_cfg['nearby_localities'])
+print('SELFTEST OK v1.4.3 canonical locality registry')

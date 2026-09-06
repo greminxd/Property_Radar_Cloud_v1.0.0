@@ -606,6 +606,14 @@ class Scraper:
         for q in source.get('api_queries') or []:
             q=clean_text(str(q))
             if q: queries.append(q)
+        # Keep OLX discovery synchronized with the same target-area database used by
+        # validation. Adding/removing a locality in config cannot silently leave OLX
+        # querying a stale hard-coded list.
+        if source.get('query_from_area_registry',True):
+            area_cfg=self.cfg.get('area') or {}
+            for q in list(area_cfg.get('primary_localities') or []) + list(area_cfg.get('nearby_localities') or []):
+                q=clean_text(str(q))
+                if q: queries.append(q)
         if not queries:
             for u in source.get('search_urls',[]):
                 q=self._olx_api_query_from_search_url(u)

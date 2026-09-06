@@ -3,16 +3,11 @@ import json, re
 from bs4 import BeautifulSoup
 from .utils import clean_text, parse_price, best_area, area_warning, phone_from_text, phone_candidates, canonical_url, asciifold
 from .classify import classify_category, classify_plot_type, planning_status, parcel_number
+from .area import registry_names, registry_outside_names
 
-# Main villages in gmina Zakliczyn plus a few nearby names that regularly appear in searches.
-KNOWN_LOCALITIES = [
-    "Bieśnik","Borowa","Charzewice","Dzierżaniny","Faliszewice","Faściszowa","Filipowice",
-    "Gwoździec","Jamna","Kończyska","Lusławice","Melsztyn","Olszowa","Paleśnica","Roztoka",
-    "Ruda Kameralna","Słona","Stróże","Wesołów","Wola Stróska","Wróblowice","Zakliczyn",
-    "Zawada Lanckorońska","Zdonia",
-    # frequent false-positive nearby locations — recognizing them lets the area filter reject them
-    "Milówka","Złota","Siemiechów","Jastrzębia","Gromnik","Wojnicz","Czchów","Domosławice",
-]
+# One canonical registry is shared by parser + area validator.  This avoids the old
+# drift where config.py/parser.py/area.py each knew a slightly different village list.
+KNOWN_LOCALITIES = list(dict.fromkeys(registry_names() + registry_outside_names()))
 
 LOCATION_PATTERNS = [
     r"(?:lokalizacja|położona|polozona|położony|polozony)(?:\s+jest)?(?:\s+w|\s*:)?\s+([A-ZŁŚŻŹĆŃÓĘĄ][\wąćęłńóśźżĄĆĘŁŃÓŚŹŻ -]{2,45})",

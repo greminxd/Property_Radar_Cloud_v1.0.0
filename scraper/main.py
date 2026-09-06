@@ -18,7 +18,7 @@ from app.rcn import RCNClient, RCN_PARSER_VERSION
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
-LISTING_PARSER_VERSION='1.4.2-location-olx-v2'
+LISTING_PARSER_VERSION='1.4.3-locality-registry-v1'
 
 def need(name):
     v=os.getenv(name,'').strip()
@@ -89,11 +89,11 @@ async def run():
             bad=[]
             for row in existing:
                 ok,_,why=area_accepts(row,area_cfg,None)
-                if (not ok) and why.startswith('explicit-outside'):
+                if (not ok) and why.startswith(('explicit-outside','known-gmina-outside-target','conflicting-locality','unknown-locality-in-target-gmina')):
                     bad.append(row.get('canonical_url'))
             purged_outside_area=db.deactivate_urls(bad,'outside-area')
             if purged_outside_area:
-                print(f'[BOOT] location migration: deactivated {purged_outside_area} explicit outside-area rows',flush=True)
+                print(f'[BOOT] location migration: deactivated {purged_outside_area} rows failing canonical locality validation',flush=True)
         except Exception as e:
             print(f'[BOOT] location migration warning: {type(e).__name__}: {e}',flush=True)
 
@@ -370,6 +370,20 @@ async def run():
         try:tg.send(summary)
         except Exception as e:errs.append('Telegram summary: '+str(e))
 
+    # Compact location-validation telemetry for Telegram/Mini App diagnostics.
+    location_reason_counts={}
+    for item in rejected:
+        reason=str(item.get('reason') or 'unknown')
+        location_reason_counts[reason]=location_reason_counts.get(reason,0)+1
+    location_validation={
+        'registry_version':'zakliczyn-teryt-2026-09',
+        'accepted_target_localities':list(area_cfg.get('primary_localities') or [])+list(area_cfg.get('nearby_localities') or []),
+        'rejected_total':len(rejected),
+        'reasons':location_reason_counts,
+    }
+    try: db.set_state('location_validation',location_validation)
+    except Exception as e: errs.append('location validation state: '+str(e))
+
     finished=datetime.now(timezone.utc).isoformat(); status='ok' if healthy_count>=max(1,len(diagnostics)//2) else 'warning'
     db.record_scan(started_at=started,finished_at=finished,downloaded_records=len(all_recs),accepted_records=len(accepted),active_after_scan=len(unique),new_count=fresh_new,price_change_count=meaningful_changes,rejected_count=len(rejected),deactivated_count=deactivated,healthy_sources=healthy_count,total_sources=len(diagnostics),diagnostics_json=json.dumps(diagnostics,ensure_ascii=False),status=status)
     db.set_state('listing_parser_version',LISTING_PARSER_VERSION)
@@ -380,7 +394,7 @@ async def run():
     except Exception as e: errs.append('Telegram live final: '+str(e))
     db.set_state('scan_github_run_id','')
     db.set_state('scan_status','idle');db.set_state('scan_phase','gotowe');db.set_state('last_scan_finished_at',finished);db.set_state('last_error','\n'.join(errs[-8:]) if errs else '')
-    (LOGS/'scan_diagnostics.json').write_text(json.dumps({'downloaded':len(all_recs),'accepted':len(accepted),'active':len(unique),'fresh_new':fresh_new,'meaningful_price_changes':meaningful_changes,'rcn_transactions':len(rcn_rows),'sources':diagnostics},ensure_ascii=False,indent=2),encoding='utf-8')
+    (LOGS/'scan_diagnostics.json').write_text(json.dumps({'downloaded':len(all_recs),'accepted':len(accepted),'active':len(unique),'fresh_new':fresh_new,'meaningful_price_changes':meaningful_changes,'rcn_transactions':len(rcn_rows),'location_validation':location_validation,'sources':diagnostics},ensure_ascii=False,indent=2),encoding='utf-8')
     (LOGS/'rejected_area.json').write_text(json.dumps(rejected,ensure_ascii=False,indent=2),encoding='utf-8')
     (LOGS/'last_errors.txt').write_text('\n'.join(errs),encoding='utf-8')
     print(summary.replace('<b>','').replace('</b>',''));print(f'Błędy/ostrzeżenia: {len(errs)}')

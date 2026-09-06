@@ -1,0 +1,51 @@
+{
+  "meta": {
+    "name": "Gmina Zakliczyn locality registry",
+    "teryt_gmina": "1216143",
+    "gmina": "Zakliczyn",
+    "powiat": "tarnowski",
+    "wojewodztwo": "małopolskie",
+    "country": "PL",
+    "verified_at": "2026-09-06",
+    "note": "Canonical locality registry used by Property Radar. target_scope controls radar acceptance; gmina-only entries are recognized but rejected unless explicitly added to the target area."
+  },
+  "localities": [
+    {"name":"Bieśnik","target_scope":"nearby","aliases":["Biesnik","Bieśniku","Bieśnika"]},
+    {"name":"Borowa","target_scope":"gmina-only","aliases":["Borowej"]},
+    {"name":"Charzewice","target_scope":"gmina-only","aliases":["Charzewicach"]},
+    {"name":"Dzierżaniny","target_scope":"gmina-only","aliases":["Dzierzaniny","Dzierżaninach","Dzierzaninach"]},
+    {"name":"Faliszewice","target_scope":"gmina-only","aliases":["Faliszewicach"]},
+    {"name":"Faściszowa","target_scope":"gmina-only","aliases":["Fasciszowa","Faściszowej","Fasciszowej"]},
+    {"name":"Filipowice","target_scope":"gmina-only","aliases":["Filipowicach"]},
+    {"name":"Granice","target_scope":"gmina-only","aliases":[]},
+    {"name":"Gwoździec","target_scope":"gmina-only","aliases":["Gwoźdźcu","Gwozdziec","Gwozdzcu"]},
+    {"name":"Jamna","target_scope":"gmina-only","aliases":["Jamnej"]},
+    {"name":"Kanada","target_scope":"gmina-only","aliases":[]},
+    {"name":"Kończyska","target_scope":"nearby","aliases":["Konczyska","Kończyskach","Konczyskach"]},
+    {"name":"Lusławice","target_scope":"nearby","aliases":["Luslawice","Lusławicach","Luslawicach"]},
+    {"name":"Melsztyn","target_scope":"gmina-only","aliases":["Melsztynie"]},
+    {"name":"Olszowa","target_scope":"nearby","aliases":["Olszowej"]},
+    {"name":"Paleśnica","target_scope":"nearby","aliases":["Palesnica","Paleśnicy","Palesnicy"]},
+    {"name":"Podlesie","target_scope":"gmina-only","aliases":[]},
+    {"name":"Roztoka","target_scope":"gmina-only","aliases":["Roztoce"]},
+    {"name":"Ruda Kameralna","target_scope":"gmina-only","aliases":["Rudzie Kameralnej"]},
+    {"name":"Słona","target_scope":"primary","aliases":["Slona","Słonej","Slonej"]},
+    {"name":"Stróże","target_scope":"gmina-only","aliases":["Stroze","Stróżach","Strozach"]},
+    {"name":"Wesołów","target_scope":"nearby","aliases":["Wesolow","Wesołowie","Wesolowie"]},
+    {"name":"Wola Stróska","target_scope":"gmina-only","aliases":["Wola Stroska","Woli Stróskiej","Woli Stroskiej"]},
+    {"name":"Wróblowice","target_scope":"gmina-only","aliases":["Wroblowice","Wróblowicach","Wroblowicach"]},
+    {"name":"Zakliczyn","target_scope":"primary","aliases":["Zakliczyna","Zakliczynie"]},
+    {"name":"Zawada Lanckorońska","target_scope":"gmina-only","aliases":["Zawada Lanckoronska","Zawadzie Lanckorońskiej","Zawadzie Lanckoronskiej"]},
+    {"name":"Zdonia","target_scope":"primary","aliases":["Zdoni","Zdonii"]}
+  ],
+  "outside_guards": [
+    {"name":"Milówka","aliases":["Milowka","Milówce","Milowce","Milówki","Milowki"]},
+    {"name":"Złota","aliases":["Zlota","Złotej","Zlotej"]},
+    {"name":"Siemiechów","aliases":["Siemiechow"]},
+    {"name":"Jastrzębia","aliases":["Jastrzebia"]},
+    {"name":"Gromnik","aliases":[]},
+    {"name":"Wojnicz","aliases":[]},
+    {"name":"Czchów","aliases":["Czchow"]},
+    {"name":"Domosławice","aliases":["Domoslawice"]}
+  ]
+}

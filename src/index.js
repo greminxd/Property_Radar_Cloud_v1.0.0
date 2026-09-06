@@ -360,6 +360,8 @@ function statusLongText(s) {
   });
   const bad=(s.diagnostics||[]).filter(x=>!x.healthy),good=(s.diagnostics||[]).filter(x=>x.healthy);
   const sourceLines=(s.diagnostics||[]).map(x=>`${x.healthy?'✅':'⚠️'} ${escapeHtml(x.source||'?')}: rekordy ${x.records??0}, linki ${x.discovered_links??0}, detail ${x.detail_pages_ok??0}${x.blocked?` • blokady ${x.blocked}`:''}${x.fatal?` • ${escapeHtml(x.fatal)}`:''}`);
+  let locValidation={}; try{locValidation=JSON.parse(s.system?.location_validation?.value||'{}')||{};}catch{}
+  const locReasons=Object.entries(locValidation.reasons||{}).sort((a,b)=>Number(b[1])-Number(a[1])).slice(0,4).map(([k,v])=>`${escapeHtml(k)} ${v}`).join(' • ');
   return [`📋 <b>PEŁNY STATUS PROPERTY RADAR</b>`,``,
     `🤖 Stan: <b>${escapeHtml(s.scan_state||'idle')}</b>`,
     `⚙️ Faza: ${escapeHtml(s.system?.scan_phase?.value||'—')}`,
@@ -371,6 +373,7 @@ function statusLongText(s) {
     ...sourceLines,
     ``,`📦 Ostatni skan: pobrano ${s.last_scan?.downloaded_records??'—'} • przyjęto ${s.last_scan?.accepted_records??'—'} • nowe ${s.last_scan?.new_count??'—'} • zmiany cen ${s.last_scan?.price_change_count??'—'}`,
     `🚫 Odrzucone ${s.last_scan?.rejected_count??'—'} • wygaszone ${s.last_scan?.deactivated_count??'—'}`,
+    locValidation.registry_version?`🧭 Walidacja lokalizacji: <b>${escapeHtml(locValidation.registry_version)}</b>${locReasons?` • ${locReasons}`:''}`:'',
     ``,`⏰ Następny automatyczny: <b>${s.next_scan}</b>`,`🧯 Ostatni błąd: ${escapeHtml(s.system?.last_error?.value||'brak')}`].filter(Boolean).join('\n');
 }
 

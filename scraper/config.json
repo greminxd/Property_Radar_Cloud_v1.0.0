@@ -73,13 +73,16 @@
       "Faliszewice",
       "Faściszowa",
       "Filipowice",
+      "Granice",
       "Gwoździec",
       "Jamna",
+      "Kanada",
       "Kończyska",
       "Lusławice",
       "Melsztyn",
       "Olszowa",
       "Paleśnica",
+      "Podlesie",
       "Roztoka",
       "Ruda Kameralna",
       "Słona",
@@ -100,7 +103,8 @@
       "Wojnicz",
       "Czchów",
       "Domosławice"
-    ]
+    ],
+    "registry": "data/localities_zakliczyn.json"
   },
   "sources": [
     {
@@ -156,7 +160,8 @@
       "html_search_pages": 1,
       "fallback_detail_pages": 20,
       "browser_session_fallback": true,
-      "browser_fallback_detail_pages": 15
+      "browser_fallback_detail_pages": 15,
+      "query_from_area_registry": true
     },
     {
       "name": "Morizon",

@@ -6,7 +6,7 @@ from app.utils import fingerprint
 from app.scoring import enrich_scores
 from app.dates import normalize_published
 from app.rcn import RCNClient
-from app.classify import classify_category
+from app.classify import classify_category, is_rental_offer
 
 html='''<html><head><meta property="og:title" content="Działka rolno-budowlana Zdonia 15 ar"><meta property="og:description" content="Zdonia, gm. Zakliczyn. Wydane warunki zabudowy. Nr działki 187/22. Telefon 600 123 456."><script type="application/ld+json">{"@type":"Offer","datePublished":"2026-09-05","dateModified":"2026-09-06"}</script></head><body><main>Powierzchnia 15 m2, faktycznie 15 ar. Cena 99 000 zł. Zdonia gm. Zakliczyn. Wydane WZ. Kontakt telefon 600 123 456.</main></body></html>'''
 r=parse_detail(html,'https://example.com/dzialka-test','TEST','plot')
@@ -320,3 +320,8 @@ ok,loc,why=area_accepts(_fake_rec,area_cfg,1.9)
 assert not ok and loc is None and why=='olx-structured-location-outside-target',(ok,loc,why)
 assert next(x for x in _cfg['sources'] if x['name']=='OLX').get('api_category_id')==3
 print('SELFTEST OK v1.4.6 OLX strict category/location')
+
+
+# v1.4.7 regressions: sale-only + OLX false positives
+assert is_rental_offer('Powierzchnia 300m2','Do wynajęcia plac. Czynsz 3000 zł / mies.','','https://www.olx.pl/d/oferta/powierzchnia-300m2-CID3-ID1c2K6x.html')
+assert not is_rental_offer('Działka budowlana 30 ar','Na sprzedaż działka budowlana','','https://www.olx.pl/d/oferta/dzialka-CID3-IDxxx.html')

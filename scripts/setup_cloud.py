@@ -74,7 +74,7 @@ print(f'[OK] D1 indexes: {len(index_stmts)} statements')
 try:
     sys.path.insert(0,str(ROOT/'scraper'))
     from app.area import area_accepts
-    from app.classify import classify_category, olx_url_cid
+    from app.classify import classify_category, olx_url_cid, is_rental_offer
     cfg=json.loads((ROOT/'scraper'/'config.json').read_text(encoding='utf-8'))
     area_cfg=cfg.get('area') or {}
     rows=d1('SELECT id,canonical_url,source,title,location,description FROM listings')
@@ -83,11 +83,9 @@ try:
     for row in rows:
         why=None
         if row.get('source')=='OLX':
-            cid=olx_url_cid(row.get('canonical_url') or '')
-            if cid is not None and cid != 3:
-                why='olx-non-real-estate-cid'
-            elif classify_category(row.get('title') or '',row.get('canonical_url') or '',row.get('description') or '',category_hint=None)!='plot':
-                why='olx-non-plot'
+            why='olx-rebuild-v147'
+        elif is_rental_offer(row.get('title') or '',row.get('description') or '','',row.get('canonical_url') or ''):
+            why='rental-offer'
         if why is None:
             ok,_,area_why=area_accepts(row,area_cfg,None)
             if (not ok) and str(area_why or '').startswith(hard_prefixes):
@@ -99,7 +97,7 @@ try:
         chunk=bad[i:i+40]; qs=','.join('?' for _ in chunk)
         d1(f'DELETE FROM price_history WHERE listing_id IN ({qs})',chunk)
         d1(f'DELETE FROM listings WHERE id IN ({qs})',chunk)
-    maintenance='1.4.6-olx-hard-filter-clean-v1'
+    maintenance='1.4.7-purge-olx-rent-v1'
     now=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
     d1("INSERT INTO system_state(key,value,updated_at) VALUES('db_maintenance_version',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",[maintenance,now])
     d1("INSERT INTO system_state(key,value,updated_at) VALUES('db_maintenance_last',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",[json.dumps({'version':maintenance,'checked_rows':len(rows),'deleted_rows':len(bad),'reasons':reasons,'finished_at':now},ensure_ascii=False),now])

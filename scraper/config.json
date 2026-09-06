@@ -129,7 +129,7 @@
       "name": "OLX",
       "enabled": true,
       "search_urls": [
-        "https://www.olx.pl/nieruchomosci/dzialki/zakliczyn/",
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/zakliczyn/",
         "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zakliczyn/"
       ],
       "detail_regex": "https?://(?:www\\.)?olx\\.pl/d/oferta/[^?#]+",
@@ -162,7 +162,8 @@
       "browser_session_fallback": true,
       "browser_fallback_detail_pages": 15,
       "query_from_area_registry": true,
-      "api_category_id": 3
+      "api_category_id": 3,
+      "sale_only": true
     },
     {
       "name": "Morizon",

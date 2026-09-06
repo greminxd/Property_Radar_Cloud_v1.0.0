@@ -11,7 +11,7 @@ from app.cloud_db import CloudDB
 from app.scraper import Scraper
 from app.geocode import Geocoder
 from app.area import area_accepts
-from app.classify import classify_category, olx_url_cid
+from app.classify import classify_category, olx_url_cid, is_rental_offer
 from app.utils import haversine_km,fingerprint
 from app.dates import normalize_published
 from app.scoring import enrich_scores
@@ -21,8 +21,8 @@ from app.egib import EGIBResolver
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
-LISTING_PARSER_VERSION='1.4.6-olx-strict-location-schedule-v1'
-DB_MAINTENANCE_VERSION='1.4.6-olx-hard-filter-clean-v1'
+LISTING_PARSER_VERSION='1.4.7-live-sale-zakliczyn-v1'
+DB_MAINTENANCE_VERSION='1.4.7-purge-olx-rent-v1'
 
 def need(name):
     v=os.getenv(name,'').strip()
@@ -99,11 +99,12 @@ async def run():
             for row in existing:
                 why=None
                 if row.get('source')=='OLX':
-                    cid=olx_url_cid(row.get('canonical_url') or '')
-                    if cid is not None and cid != 3:
-                        why='olx-non-real-estate-cid'
-                    elif classify_category(row.get('title') or '',row.get('canonical_url') or '',row.get('description') or '',category_hint=None)!='plot':
-                        why='olx-non-plot'
+                    # v1.4.7 deliberately rebuilds OLX from scratch because older rows can
+                    # contain wrong Zakliczyn/rental false positives that cannot be safely
+                    # distinguished after the old geocoder overwrote their coordinates.
+                    why='olx-rebuild-v147'
+                elif is_rental_offer(row.get('title') or '',row.get('description') or '','',row.get('canonical_url') or ''):
+                    why='rental-offer'
                 if why is None:
                     ok,_,area_why=area_accepts(row,area_cfg,None)
                     if (not ok) and str(area_why or '').startswith(hard_prefixes):
@@ -172,8 +173,23 @@ async def run():
             r=dict(rec0)
             jsonld=r.pop('_jsonld',[]); body=r.pop('_body','')
             fold=body.lower().replace('ł','l')
+            if is_rental_offer(r.get('title') or '',r.get('description') or body,'',r.get('canonical_url') or ''):
+                batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'reason':'rental-offer'}); continue
             if 'gmina siepraw' in fold or 'powiat myslenicki' in fold:
                 batch_rejected.append({'url':r.get('canonical_url'),'reason':'wrong Zakliczyn (Siepraw/Myślenice)'}); continue
+            # OLX Zakliczyn is ambiguous. Trust OLX structured coordinates, never the
+            # geocoder that was explicitly biased toward our Zakliczyn in old builds.
+            if r.get('source')=='OLX':
+                olx_lat=r.get('_olx_structured_lat');olx_lon=r.get('_olx_structured_lon')
+                if olx_lat is not None and olx_lon is not None:
+                    olx_d=haversine_km(cfg['center']['lat'],cfg['center']['lon'],float(olx_lat),float(olx_lon))
+                    r['lat']=float(olx_lat);r['lon']=float(olx_lon);r['distance_km']=olx_d
+                    if olx_d>20.0:
+                        batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':olx_d,'reason':'olx-structured-geo-outside-target'}); continue
+                elif (r.get('location') or '').strip().lower()=='zakliczyn':
+                    target_text=(str(r.get('title') or '')+' '+str(r.get('description') or '')+' '+body).lower().replace('ł','l')
+                    if not any(x in target_text for x in ('powiat tarnowsk','gmina zakliczyn','nad dunajcem','tarnow')):
+                        batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'reason':'olx-ambiguous-zakliczyn-no-geo'}); continue
             # Resolve the target area from listing text FIRST. In whitelist mode we
             # deliberately do not let an arbitrary JSON-LD coordinate rescue an unknown
             # locality: portals can embed geo for recommended offers and that caused
@@ -186,8 +202,11 @@ async def run():
             locality=text_locality
             confidence=text_confidence
             if locality:
-                query=(locality+', gmina Zakliczyn, powiat tarnowski') if locality.lower()=='zakliczyn' else (locality+', gmina Zakliczyn, powiat tarnowski')
-                coords=geocoder.geocode(query)
+                if r.get('source')=='OLX' and r.get('_olx_structured_lat') is not None and r.get('_olx_structured_lon') is not None:
+                    coords=(float(r['_olx_structured_lat']),float(r['_olx_structured_lon']))
+                else:
+                    query=locality+', gmina Zakliczyn, powiat tarnowski'
+                    coords=geocoder.geocode(query)
             elif (area_cfg or {}).get('mode')!='locality_whitelist':
                 coords=geocoder.from_jsonld(jsonld)
                 if not coords and r.get('location'):

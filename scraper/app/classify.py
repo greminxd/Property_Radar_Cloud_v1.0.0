@@ -103,3 +103,18 @@ def parcel_number(text: str) -> str | None:
             return m.group(1)
     return None
 
+
+
+def is_rental_offer(title: str = '', description: str = '', params_text: str = '', url: str = '') -> bool:
+    """Hard reject rentals/leases. Property Radar is sale-only."""
+    t=asciifold(' '.join([title or '', params_text or '', url or '']))
+    d=asciifold((description or '')[:5000])
+    hard=[
+        r'\bdo wynajecia\b', r'\bna wynajem\b', r'\bwynajem\b', r'\bwynajme\b',
+        r'\bnajem\b', r'\bdzierzaw[ayie]\b', r'\bdo dzierzawy\b',
+        r'\bczynsz\b', r'\bz[lł]\s*/\s*mies', r'\bz[lł]\s*miesiecznie\b',
+        r'\bmiesiecznie\b', r'\bza miesiac\b', r'\bmies\.?\s*/\s*mc\b'
+    ]
+    if any(re.search(p,t,re.I) for p in hard): return True
+    desc_hard=[r'\boferta wynajmu\b',r'\bprzedmiotem wynajmu\b',r'\bdo wynajecia\b',r'\bna wynajem\b',r'\bczynsz.{0,40}(?:zl|pln)',r'(?:zl|pln).{0,15}/\s*mies']
+    return any(re.search(p,d,re.I) for p in desc_hard)

@@ -64,7 +64,9 @@ function pctText(v){return v==null?'—':`${v>=0?'+':''}${v.toFixed(1).replace('
 function toast(s){const el=$('#toast');el.textContent=s;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),2500)}
 
 async function api(path, opts={}) {
-  const r = await fetch(path, { credentials:'include', ...opts, headers:{'content-type':'application/json', ...(opts.headers||{})} });
+  const isRead=!opts.method||String(opts.method).toUpperCase()==='GET';
+  const url=isRead?`${path}${path.includes('?')?'&':'?'}_=${Date.now()}`:path;
+  const r = await fetch(url, { credentials:'include', cache:'no-store', ...opts, headers:{'content-type':'application/json','cache-control':'no-cache', ...(opts.headers||{})} });
   let body = {};
   try { body = await r.json(); } catch {}
   if (!r.ok) throw Object.assign(new Error(body.error || `HTTP ${r.status}`), {status:r.status});
@@ -289,28 +291,23 @@ function analyticsHtml(r){
   </div>`;
 }
 function card(r){
-  const isPlot=r.category==='plot'; const distance=r.distance_km==null?'? km':`${(+r.distance_km).toFixed(1)} km`;
-  const archived=isArchived(r);
-  const phone=r.phone?`<a class="phone-btn" href="tel:${esc(r.phone)}">☎ ${esc(r.phone)}</a>`:`<div class="phone-btn disabled">☎ telefon brak / ukryty</div>`;
+  const archived=isArchived(r); const distance=r.distance_km==null?'—':`${(+r.distance_km).toFixed(1)} km`;
   const img=r.image_url?`<img src="${esc(r.image_url)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`:'';
-  const badges=[
-    archived?badge('ARCHIWALNA','warn'):'', badge(r.plot_type||'nieustalona','blue'), badge(r.planning_status||'nieustalone'),
-    badge(sizeBadge(r.area_m2)),r.area_warning?badge('⚠ metraż','warn'):'',r.phone?badge('☎ telefon','good'):'',r.parcel_number?badge('🗺 nr działki','good'):'',
-    r.parcel_id?badge('🎯 EGiB','good'):'',Number(r.rcn_history_count||0)>0?badge(`🧾 RCN historia ${r.rcn_history_count}`,'hot'):'',
-    r.last_meaningful_price_change_at?badge('📉 zmiana ceny','hot'):''
-  ].join('');
-  return `<article class="card ${archived?'archived-card':''}" data-id="${r.id}">
-    <div class="photo">${img}<div class="photo-fallback">${isPlot?'🌱':'🚗'}</div><span class="source-tag">${esc(r.source||'?')}</span></div>
-    <div class="card-body"><div class="card-top"><div class="title">${esc(r.title||'(bez tytułu)')}</div><div class="distance">${distance}</div></div>
-    <div class="location">📍 ${esc(loc(r))}</div>
-    <div class="numbers"><div class="num"><span>Cena</span><b>${fmtMoney(r.price)}</b></div><div class="num"><span>Powierzchnia</span><b>${fmtArea(r.area_m2)}</b></div><div class="num"><span>Cena / m²</span><b>${fmtPpm(r.price_m2)}</b></div></div>
-    <div class="badges">${badges}</div>
-    ${isPlot?`<div class="market-compact"><span>📢 m² vs ogłoszenia <b>${pctText(marketDeltaPct(r))}</b><small>${r.median_comparable?`${fmtPpm(r.price_m2)} vs ${fmtPpm(r.median_comparable)}`:'brak benchmarku'}</small></span><span>🏛 m² vs RCN <b>${pctText(rcnDeltaPct(r))}</b><small>${trustedRcn(r)?`${fmtPpm(r.price_m2)} vs ${fmtPpm(r.rcn_median_ppm)}`:'brak benchmarku'}</small></span></div>`:''}
-    ${Number(r.rcn_history_count||0)>0?`<div class="archive-note">🧾 RCN: ta działka ma historię transakcyjną • ostatnio ${dateOnly(r.rcn_history_last_date)} • ${fmtMoney(r.rcn_history_last_price)}${r.rcn_history_last_ppm?` • ${fmtPpm(r.rcn_history_last_ppm)}`:''}</div>`:''}
-    <div class="meta-line"><span>🗓 dodane na portalu: <b>${dateOnly(r.published_at)}</b></span>${r.updated_at?`<span>↻ aktualizacja: ${dateOnly(r.updated_at)}</span>`:''}<span>📡 Radar zobaczył: ${dateOnly(r.first_seen)}</span></div>
-    ${archived&&r.archive_reason?`<div class="archive-note">⚠ ${esc(r.archive_reason)}</div>`:''}
-    <div class="card-actions"><a class="open-btn" href="${esc(r.canonical_url)}" target="_blank" rel="noopener">Otwórz ogłoszenie</a>${phone}<button class="detail-btn" data-detail="${r.id}">Szczegóły</button></div>
-    </div></article>`;
+  const market=marketDeltaPct(r), rcn=rcnDeltaPct(r);
+  const tags=[r.plot_type&&r.plot_type!=='nieustalona'?r.plot_type:'',r.planning_status&&r.planning_status!=='nieustalone'?r.planning_status:'',r.parcel_number?`dz. ${r.parcel_number}`:'',Number(r.rcn_history_count||0)>0?'RCN historia':''].filter(Boolean);
+  return `<article class="card offer-card ${archived?'archived-card':''}" data-id="${r.id}">
+    <div class="photo offer-photo">${img}<div class="photo-fallback">🌱</div><span class="source-tag">${esc(r.source||'?')}</span>${archived?'<span class="archive-overlay">ARCHIWALNA</span>':''}</div>
+    <div class="card-body offer-body">
+      <div class="offer-kicker"><span>📍 ${esc(loc(r))}</span><span>${distance}</span></div>
+      <div class="offer-title">${esc(r.title||'Działka')}</div>
+      <div class="offer-price-row"><strong>${fmtMoney(r.price)}</strong><span>${fmtPpm(r.price_m2)}</span></div>
+      <div class="offer-facts"><div><b>${fmtArea(r.area_m2)}</b><span>powierzchnia</span></div><div><b>${dateOnly(r.published_at)}</b><span>dodano</span></div>${r.phone?'<div><b>☎ dostępny</b><span>kontakt</span></div>':''}</div>
+      ${tags.length?`<div class="offer-tags">${tags.map(x=>`<span>${esc(x)}</span>`).join('')}</div>`:''}
+      <div class="offer-comparison"><span><small>vs ogłoszenia</small><b>${pctText(market)}</b></span><span class="rcn"><small>vs RCN</small><b>${pctText(rcn)}</b></span></div>
+      ${Number(r.rcn_history_count||0)>0?`<div class="offer-history">🧾 Historia RCN • ${dateOnly(r.rcn_history_last_date)} • ${fmtMoney(r.rcn_history_last_price)}</div>`:''}
+      <div class="offer-actions"><button class="detail-btn" data-detail="${r.id}">Szczegóły</button>${r.phone?`<a class="phone-btn" href="tel:${esc(r.phone)}">Zadzwoń</a>`:''}<a class="open-btn" href="${esc(r.canonical_url)}" target="_blank" rel="noopener">Otwórz</a></div>
+    </div>
+  </article>`;
 }
 function presetLabel(){
   const ageLabel={7:'≤7 dni',30:'≤30 dni',90:'≤90 dni',all:'dowolna data',unknown:'bez daty'}[state.age]||state.age;

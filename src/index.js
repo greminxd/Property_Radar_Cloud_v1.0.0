@@ -332,8 +332,13 @@ function parseDiag(last) {
 }
 
 function nextScanLabel() {
-  const hour=Number(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Warsaw',hour:'2-digit',hour12:false}).format(new Date()));
-  const m=now.getMinutes(); if(hour<9 || (hour===9&&m<7))return 'dzisiaj 09:07'; if(hour<20 || (hour===20&&m<7))return 'dzisiaj 20:07'; return 'jutro 09:07';
+  const now=new Date();
+  const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Warsaw',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(now);
+  const hour=Number(parts.find(x=>x.type==='hour')?.value||0);
+  const m=Number(parts.find(x=>x.type==='minute')?.value||0);
+  if(hour<9 || (hour===9&&m<7))return 'dzisiaj 09:07';
+  if(hour<20 || (hour===20&&m<7))return 'dzisiaj 20:07';
+  return 'jutro 09:07';
 }
 
 async function botStatus(env) {
@@ -358,6 +363,31 @@ function statusShortText(s) {
     `🔎 Ostatni skan: ${plDate(s.last_scan?.finished_at)}`,
     `🌐 Ostatnio źródła OK: ${s.last_scan?`${s.last_scan.healthy_sources||0}/${s.last_scan.total_sources||0}`:'—'}`,
     `⏰ Następny: <b>${s.next_scan}</b>`].join('\n');
+}
+
+
+function statusLiveText(s) {
+  const p=s.scan_progress||{}, src=Array.isArray(p.sources)?p.sources:[];
+  const total=Math.max(0,Number(p.total_sources||0)), done=Math.max(0,Number(p.done_sources||0));
+  let pct=total?Math.round(done/total*100):0;
+  if(String(s.scan_state||'')==='running' && total && done>=total) pct=99;
+  const blocks=10, filled=Math.min(blocks,Math.round(pct/10));
+  const bar='█'.repeat(filled)+'░'.repeat(blocks-filled);
+  const lines=[`📡 <b>SKAN PROPERTY RADAR · LIVE</b>`,`<code>${bar}</code> <b>${pct}%</b>`,`🌐 Źródła: <b>${done}/${total}</b>  •  📥 pobrano: <b>${Number(p.downloaded_records||0)}</b>  •  ✅ przyjęto: <b>${Number(p.accepted_records||0)}</b>`];
+  if(src.length){
+    lines.push('');
+    for(const x of src){
+      const st=String(x.status||'');
+      const ico=st==='done'?(x.healthy?'✅':'⚠️'):st==='running'?'🔄':st==='cancelled'?'⏹':'▫️';
+      const tail=st==='done'?` · ${Number(x.records||0)}`:'';
+      lines.push(`${ico} ${escapeHtml(x.name||'?')}${tail}`);
+    }
+  }
+  lines.push('',`⚙️ ${escapeHtml(s.system?.scan_phase?.value||'Skan w toku')}`,'Dane z ukończonych źródeł są już widoczne w Mini App.');
+  return lines.join('\n');
+}
+function statusShortOrLive(s){
+  return ['running','queued','cancelling'].includes(String(s.scan_state||'')) ? statusLiveText(s) : statusShortText(s);
 }
 
 function statusLongText(s) {
@@ -610,7 +640,7 @@ Skan automatyczny: <b>09:07 / 20:07</b>.`,mainMenu(origin,role));
     const ack=telegramApi(env,'answerCallbackQuery',{callback_query_id:callback.id}).catch(()=>null);
     const done=async(p)=>{await Promise.all([ack,p]);return new Response('ok');};
     const data=callback.data||'';
-    if(data==='status:short'){const s=await botStatus(env);return await done(send(statusShortText(s),{inline_keyboard:[[{text:'📋 Pełny status',callback_data:'status:long'}],[{text:'⬅️ Menu',callback_data:'menu'}]]}));}
+    if(data==='status:short'){const s=await botStatus(env);return await done(send(statusShortOrLive(s),{inline_keyboard:[[{text:'📋 Pełny status',callback_data:'status:long'}],[{text:'⬅️ Menu',callback_data:'menu'}]]}));}
     if(data==='status:long'){const s=await botStatus(env);return await done(send(statusLongText(s),{inline_keyboard:[[{text:'📊 Krótki status',callback_data:'status:short'}],[{text:'⬅️ Menu',callback_data:'menu'}]]}));}
     if(data==='database'){const d=await databaseStats(env);return await done(send(databaseStatusText(d)));}
     if(data==='menu'){return await done(send(`🏡 <b>PROPERTY RADAR</b>\nWybierz funkcję:`,mainMenu(origin,role)));}
@@ -658,7 +688,7 @@ user_id: <code>${escapeHtml(userId)}</code>`);
   } else if(text==='/ceny'){
     const rows=await listForBot(env,'price');if(!rows.length)await send('Brak istotnych zmian cen.');for(const r of rows)await sendListing(r,'price');
   } else if(text==='/statuspelny') await send(statusLongText(await botStatus(env)));
-  else if(text==='/status') await send(statusShortText(await botStatus(env)),{inline_keyboard:[[{text:'📋 Pełny status',callback_data:'status:long'}],[{text:'⬅️ Menu',callback_data:'menu'}]]});
+  else if(text==='/status'){const s=await botStatus(env);await send(statusShortOrLive(s),{inline_keyboard:[[{text:'📋 Pełny status',callback_data:'status:long'}],[{text:'⬅️ Menu',callback_data:'menu'}]]});}
   else if(text==='/baza') await send(databaseStatusText(await databaseStats(env)));
   else if(text==='/skanuj'&&role==='admin'){await send('🔄 <b>Zlecam skan…</b>');const d=await dispatchScan(env);await send(d.ok?'✅ Skan zlecony. Brak limitu ręcznych uruchomień.':`⚠️ ${escapeHtml(d.message)}`);}
   else if((text==='/stopscan'||text==='/stop')&&role==='admin'){await send('⏹ <b>Zatrzymuję skan…</b>');const d=await stopScan(env);await send(d.ok?`✅ Skan zatrzymany. Run: <code>${d.run_id}</code>`:`⚠️ ${escapeHtml(d.message)}`);}
@@ -694,13 +724,13 @@ async function handleApi(req, env, url) {
   if (url.pathname === '/api/me') return json({ ok: true, user });
 
   if (url.pathname === '/api/stats') return json(await databaseStats(env));
-  if (url.pathname === '/api/status') return json(await botStatus(env));
+  if (url.pathname === '/api/status') return json(await botStatus(env),200,{'Cache-Control':'no-store, no-cache, must-revalidate'});
 
   if (url.pathname === '/api/listings') {
     // Mini App is plots-only. Legacy houses/garages can remain in D1 for audit/history,
     // but they are never returned to the user-facing listing browser.
     const rows = await env.DB.prepare(`SELECT * FROM listings WHERE category='plot' AND COALESCE(source_status,'active')<>'invalid-parser' ORDER BY COALESCE(published_at,first_seen) DESC, id DESC LIMIT 2500`).all();
-    return json({ listings: rows.results || [], stats: await databaseStats(env) });
+    return json({ listings: rows.results || [], stats: await databaseStats(env) },200,{'Cache-Control':'no-store, no-cache, must-revalidate'});
   }
 
   const m = url.pathname.match(/^\/api\/listing\/(\d+)\/history$/);

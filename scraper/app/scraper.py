@@ -12,9 +12,9 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urldefrag, urlencode, urlsplit
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from .utils import canonical_url, clean_text, phone_candidates, asciifold
+from .utils import canonical_url, clean_text, phone_candidates, asciifold, haversine_km
 from .parser import parse_detail, refine_from_rendered_text
-from .classify import classify_category, olx_url_cid
+from .classify import classify_category, olx_url_cid, is_rental_offer
 
 
 _BLOCK_MARKERS = (
@@ -468,6 +468,37 @@ class Scraper:
         # the old false positives.
         return classify_category(title,url,params,category_hint=None)=='plot'
 
+    @staticmethod
+    def _olx_offer_geo(offer: dict):
+        """Extract OLX structured map coordinates without using prose/geocoding."""
+        def pair(obj):
+            if not isinstance(obj,dict): return None
+            lat=obj.get('lat',obj.get('latitude'))
+            lon=obj.get('lon',obj.get('lng',obj.get('longitude')))
+            try:
+                lat=float(lat);lon=float(lon)
+                if 48.0<lat<51.5 and 18.0<lon<23.5:return lat,lon
+            except Exception: pass
+            return None
+        for key in ('map','geo','coordinates','location'):
+            obj=offer.get(key)
+            got=pair(obj)
+            if got:return got
+            if isinstance(obj,dict):
+                for sub in ('map','geo','coordinates'):
+                    got=pair(obj.get(sub))
+                    if got:return got
+        return pair(offer)
+
+    @classmethod
+    def _olx_offer_is_rental(cls, offer: dict) -> bool:
+        params=' '.join(cls._olx_params_lines(offer))
+        price=offer.get('price') or {}
+        price_label=cls._olx_value_text(price.get('label') if isinstance(price,dict) else '')
+        raw_desc=str(offer.get('description') or '')
+        desc=clean_text(BeautifulSoup(raw_desc,'lxml').get_text(' ',strip=True))
+        return is_rental_offer(str(offer.get('title') or ''),desc,params+' '+price_label,str(offer.get('url') or ''))
+
     @classmethod
     def _olx_record_from_api(cls, offer: dict) -> dict | None:
         """Turn one public /api/v1/offers item into the normal Property Radar record.
@@ -477,7 +508,7 @@ class Scraper:
         listing document through ``parse_detail`` lets us reuse the battle-tested
         area/ppm/planning/parcel parser without opening a browser tab per advert.
         """
-        if not isinstance(offer,dict) or not cls._olx_offer_is_plot(offer):
+        if not isinstance(offer,dict) or not cls._olx_offer_is_plot(offer) or cls._olx_offer_is_rental(offer):
             return None
         url=canonical_url(str(offer.get('url') or ''),str(offer.get('url') or ''))
         if not url:
@@ -501,6 +532,7 @@ class Scraper:
                 city=_loc_name(location.get('locality') or location.get('place'))
         city=city or _loc_name(offer.get('city') or offer.get('city_name') or offer.get('cityName'))
         region=region or _loc_name(offer.get('region') or offer.get('region_name') or offer.get('regionName'))
+        geo=cls._olx_offer_geo(offer)
         price_obj=offer.get('price') or offer.get('price_label') or {}
         price_value=None
         price_label=''
@@ -566,6 +598,10 @@ class Scraper:
                 rec['location_confidence']='olx-api-structured'
             else:
                 rec['location_confidence']=rec.get('location_confidence') or 'olx-api-generic'
+        if geo:
+            rec['_olx_structured_lat']=geo[0]; rec['_olx_structured_lon']=geo[1]
+            rec['lat']=geo[0];rec['lon']=geo[1]
+        rec['_transaction_type']='sale'
         if photo and not rec.get('image_url'): rec['image_url']=photo
         status=clean_text(str(offer.get('status') or '')).lower()
         if status and status not in {'active','new'}:
@@ -658,7 +694,7 @@ class Scraper:
                 url=canonical_url(str(offer.get('url') or ''),str(offer.get('url') or ''))
                 if not url or not pattern.match(url) or url in seen_urls:
                     continue
-                if not self._olx_offer_is_plot(offer):
+                if not self._olx_offer_is_plot(offer) or self._olx_offer_is_rental(offer):
                     continue
                 stats['plot']+=1
                 try:
@@ -838,6 +874,7 @@ class Scraper:
                                 if vis:
                                     rec=refine_from_rendered_text(rec,vis);rec['_body']=(rec.get('_body') or '')+' '+vis[:9000]
                                 rec['category']=classify_category(rec.get('title') or '',actual or u,rec.get('_body') or vis,category_hint=None)
+                                if is_rental_offer(rec.get('title') or '',rec.get('_body') or vis,'',actual or u): return
                                 ok,blocked=self._listing_like(rec,vis)
                                 if ok and not blocked and rec.get('category') in self.cfg['filters']['categories']:
                                     cu=rec.get('canonical_url') or u
@@ -872,6 +909,7 @@ class Scraper:
                 rec=parse_detail(html,final_url or u,'OLX',category_hint='plot')
                 body=rec.get('_body') or ''
                 rec['category']=classify_category(rec.get('title') or '',final_url or u,body,category_hint=None)
+                if is_rental_offer(rec.get('title') or '',body,'',final_url or u): return
                 if body: rec=refine_from_rendered_text(rec,body)
                 ok,blocked=self._listing_like(rec,body)
                 if ok and not blocked and rec.get('category') in self.cfg['filters']['categories']:

@@ -247,11 +247,16 @@ def _explicit_plot_area(text: str) -> tuple[float | None,str | None,str | None]:
 def _total_price_from_text(text: str) -> float | None:
     """Extract total PLN price while explicitly ignoring price-per-m² labels."""
     vals=[]
-    rx=re.compile(r"(\d[\d\s\xa0.,]{1,18})\s*(?:zł|PLN)\b",re.I)
+    amount=r"(?:\d{1,3}(?:[\s\xa0.]\d{3})+|\d{4,12}|\d{1,5}(?:[.,]\d{1,2})?|\d{1,3})"
+    rx=re.compile(rf"(?<!\d)({amount})\s*(?:zł|PLN)\b",re.I)
     for m in rx.finditer(text or ''):
-        before=asciifold((text or '')[max(0,m.start()-35):m.start()])
+        before=asciifold((text or '')[max(0,m.start()-28):m.start()])
         after=asciifold((text or '')[m.end():m.end()+18])
-        if 'cena za m' in before or re.match(r'\s*/\s*m(?:2|²)',after):
+        # Reject only a ppm label immediately attached to this number. A previous
+        # ppm field elsewhere in the same line must not make us reject the later
+        # total price.
+        ppm_label_before=bool(re.search(r'cena\s*(?:za|/)\s*m(?:2)?\s*[:\-]?\s*$',before))
+        if ppm_label_before or re.match(r'\s*/\s*m(?:2|²)',after):
             continue
         n=parse_price(m.group(0))
         if n and 100 <= n <= 1_000_000_000:
@@ -260,6 +265,57 @@ def _total_price_from_text(text: str) -> float | None:
     # On a focused listing body the total offer price is normally the largest PLN
     # amount; per-m² values were removed above.
     return max(vals)
+
+
+def _price_m2_from_text(text: str) -> float | None:
+    """Extract an explicitly labelled asking price per square metre.
+
+    This value is first-class data. It must never be routed through ``parse_price``
+    because e.g. ``97.22 zł/m²`` used to become ``9722 zł`` and poison market
+    medians after another division by plot area.
+    """
+    t=text or ''
+    patterns=[
+        r"(?:cena\s*(?:za|/)\s*m(?:²|2)|cena\s+metra(?:\s+kwadratowego)?)\s*[:\-]?\s*(\d[\d\s\xa0]*(?:[.,]\d+)?)\s*(?:zł|PLN)(?:\s*/\s*m(?:²|2))?",
+        r"(\d[\d\s\xa0]*(?:[.,]\d+)?)\s*(?:zł|PLN)\s*/\s*m(?:²|2)",
+    ]
+    for pat in patterns:
+        m=re.search(pat,t,re.I)
+        if not m: continue
+        raw=m.group(1).replace('\xa0','').replace(' ','').replace(',','.')
+        try:
+            v=float(raw)
+        except ValueError:
+            continue
+        if 0.1 <= v <= 100_000:
+            return v
+    return None
+
+
+def _reconcile_price_fields(price: float | None, area: float | None, explicit_ppm: float | None):
+    """Return a self-consistent (total price, price/m²) pair.
+
+    Explicit portal ppm wins for the comparison metric. If a generic total-price
+    fallback accidentally captured a monthly instalment or ppm value, repair only
+    gross contradictions (>4x) using area * explicit ppm. Small differences are
+    normal portal rounding and leave the advertised total untouched.
+    """
+    ppm=explicit_ppm if explicit_ppm and explicit_ppm > 0 else None
+    if area and area > 0 and price and price > 0:
+        derived=float(price)/float(area)
+    else:
+        derived=None
+    if ppm is None:
+        return price, derived
+    if area and area > 0:
+        expected=float(ppm)*float(area)
+        if price is None or price <= 0:
+            price=expected
+        elif expected > 0:
+            ratio=max(float(price),expected)/max(1.0,min(float(price),expected))
+            if ratio >= 4.0:
+                price=expected
+    return price, ppm
 
 
 def _sprzedajemy_plot_area(text: str) -> float | None:
@@ -341,8 +397,10 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
         if not updated: updated=clean_text(str(o.get("dateModified") or ""))
 
     if price is None: price=_embedded_price(payloads)
-    if source=="Sprzedajemy" and price is None:
-        price=_total_price_from_text(focused)
+    # Total asking price and price/m² are different fields. Always exclude labelled
+    # ppm values before falling back to the generic price parser.
+    if price is None: price=_total_price_from_text(focused)
+    if price is None: price=_total_price_from_text(body[:4500])
     if price is None: price=parse_price(focused)
     if price is None: price=parse_price(body[:4500])
 
@@ -378,6 +436,9 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
     else:
         area,_=best_area(focused)
         awarn=area_warning(focused)
+
+    explicit_ppm=_price_m2_from_text(focused) or _price_m2_from_text(body[:7000])
+    price,price_m2=_reconcile_price_fields(price,area,explicit_ppm)
     phone=_phone_from_soup(soup, desc+" "+body)
     if not published:
         v=_embedded_first(payloads,["datePosted","datePublished","publishedAt","createdAt","createdDate","creationDate"])
@@ -430,7 +491,7 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
     return {
         "canonical_url": canonical_url(url,url), "source":source, "category":cat,
         "title": title[:500], "price":price, "area_m2":area,
-        "price_m2": (price/area if price and area else None), "plot_type":ptype,
+        "price_m2": price_m2, "plot_type":ptype,
         "planning_status":plan, "location":loc[:250], "location_confidence":loc_conf,
         "phone":phone, "parcel_number":parcel, "published_text":published[:100], "updated_text":updated[:100],
         "source_status":source_status, "archive_reason":archive_reason,
@@ -462,13 +523,15 @@ def refine_from_rendered_text(rec: dict, visible_text: str) -> dict:
                     rec["area_m2"]=ta
             except Exception:pass
     if rec.get("price") is None:
-        rec["price"]=parse_price(early)
+        rec["price"]=_total_price_from_text(early) or parse_price(early)
     if rec.get("area_m2") is None and rec.get("category")=="plot":
         a,_,_= _explicit_plot_area(early)
         if a is None: a,_=best_area(early)
         if a is not None: rec["area_m2"]=a
-    if rec.get("price") and rec.get("area_m2"):
-        rec["price_m2"]=rec["price"]/rec["area_m2"]
+    explicit_ppm=_price_m2_from_text(early)
+    rec["price"],rec["price_m2"]=_reconcile_price_fields(
+        rec.get("price"),rec.get("area_m2"),explicit_ppm
+    )
     loc_fold=asciifold(rec.get("location") or "")
     if loc_fold in {"", "zakliczyn", "gmina zakliczyn", "powiat tarnowski", "tarnowski", "malopolskie"}:
         ef=asciifold(early)

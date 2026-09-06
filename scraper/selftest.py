@@ -123,3 +123,43 @@ assert spr['area_m2']==1000,spr
 assert spr['published_text'],spr
 assert normalize_published(spr['published_text']) is not None,spr
 print('SELFTEST OK v1.2.6 RCN/parser')
+
+# v1.3.0: OLX may render price/m² before total price. Never interpret ppm as total.
+olx_html="""<html><head><title>Działka Lusławice 36 ar z WZ</title></head><body><main>
+Rodzaj: Działki rolno-budowlane Powierzchnia: 3 600 m² Cena za m²: 97.22 zł/m²
+Opis oferty. 350 000 zł do negocjacji. Lokalizacja Zakliczyn.
+</main></body></html>"""
+olx=parse_detail(olx_html,'https://www.olx.pl/d/oferta/test-CID3-IDabc.html','OLX','plot')
+assert olx['price']==350000,olx
+assert olx['area_m2']==3600,olx
+assert abs(olx['price_m2']-97.22)<0.01,olx
+
+# Tabelaofert server-rendered shape: explicit ppm is authoritative for comparisons,
+# but total price stays the actual asking price (small rounding difference is normal).
+tab_html="""<html><head><title>Działka na sprzedaż, 5 400,00 m², Zakliczyn</title></head><body><main>
+<h1>Działka na sprzedaż, 5 400,00 m², oferta nr BEST-GS-15365</h1>
+199 000 zł 37 zł /m² Zakliczyn Cena za m²: 37 zł Powierzchnia: 5 400,00 m²
+</main></body></html>"""
+tab=parse_detail(tab_html,'https://tabelaofert.pl/oferta/dzialka-budowlana-zakliczyn,10401479','Tabelaofert','plot')
+assert tab['price']==199000,tab
+assert tab['area_m2']==5400,tab
+assert tab['price_m2']==37,tab
+
+# Scoring invariant: only ppm participates. Total plot price must not change the result.
+a={'canonical_url':'a','category':'plot','plot_type':'budowlana','planning_status':'MPZP','area_m2':1000,'price':100000,'price_m2':100}
+b={'canonical_url':'b','category':'plot','plot_type':'budowlana','planning_status':'MPZP','area_m2':2000,'price':200000,'price_m2':100}
+c={'canonical_url':'c','category':'plot','plot_type':'budowlana','planning_status':'MPZP','area_m2':1500,'price':150000,'price_m2':100}
+target={'canonical_url':'t','category':'plot','plot_type':'budowlana','planning_status':'MPZP','area_m2':1200,'price':240000,'price_m2':200}
+enrich_scores(target,[a,b,c],config)
+assert target['median_comparable']==100,target
+print('SELFTEST OK v1.3.0 ppm-only pricing')
+
+# v1.3.0: Tabelaofert search page must ignore recommendation links beyond its result count.
+_tab_html = "Znaleziono 3 oferty " + " ".join(
+    f'<a href="https://tabelaofert.pl/oferta/dzialka-x,{i}">Działka {i}</a>' for i in range(1,6)
+)
+_tab_pat=_re.compile(r"https?://(?:www\.)?tabelaofert\.pl/oferta/[^?#,]+(?:,|%2C)\d+",_re.I)
+_tab_links,_=Scraper._extract_links_from_html('https://tabelaofert.pl/sprzedaz/dzialki/zakliczyn',_tab_html,_tab_pat)
+_tab_links=Scraper._source_filter_discovery('Tabelaofert',_tab_html,_tab_links)
+assert len(_tab_links)==3,_tab_links
+print('SELFTEST OK v1.3.0 Tabelaofert discovery cap')

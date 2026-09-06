@@ -161,7 +161,27 @@ class Scraper:
                     break
         return out, nxt
 
-    async def _discover_http(self, start_url: str, pattern: re.Pattern, max_pages: int):
+    @staticmethod
+    def _source_filter_discovery(source_name: str, html: str, links: list[str]) -> list[str]:
+        """Portal-specific cleanup of search-page links.
+
+        Tabelaofert renders extra/recommended ``/oferta/...`` links on the same page.
+        Its heading exposes the real result count (e.g. ``Znaleziono 3 oferty``), so
+        only the first N canonical detail links belong to the actual result list.
+        """
+        if source_name == "Tabelaofert" and html:
+            try:
+                text=clean_text(BeautifulSoup(html,"lxml").get_text(" ",strip=True))
+                m=re.search(r"Znaleziono\s+(\d+)\s+ofert",text,re.I)
+                if m:
+                    n=max(0,int(m.group(1)))
+                    if n:
+                        return links[:n]
+            except Exception:
+                pass
+        return links
+
+    async def _discover_http(self, start_url: str, pattern: re.Pattern, max_pages: int, source_name: str = ""):
         current = start_url
         seen = set()
         found = []
@@ -175,6 +195,7 @@ class Scraper:
             if status != 200:
                 break
             links, nxt = self._extract_links_from_html(final_url, html, pattern)
+            links = self._source_filter_discovery(source_name, html, links)
             found.extend(links)
             if not nxt:
                 break
@@ -244,7 +265,7 @@ class Scraper:
         http_statuses = []
 
         try:
-            max_search_pages = int(self.cfg["browser"].get("max_search_pages_per_url", 3))
+            max_search_pages = int(source.get("max_search_pages", self.cfg["browser"].get("max_search_pages_per_url", 3)))
             prefer_http = source.get("prefer_http_discovery", source["name"] in {"OLX", "Otodom", "Gratka", "Tabelaofert"})
 
             for search_url in source["search_urls"]:
@@ -252,7 +273,7 @@ class Scraper:
                 got_for_url = 0
 
                 if prefer_http:
-                    links_http, statuses = await self._discover_http(search_url, pattern, max_search_pages)
+                    links_http, statuses = await self._discover_http(search_url, pattern, max_search_pages, source["name"])
                     http_statuses.extend(statuses)
                     if links_http:
                         for h in links_http:
@@ -309,7 +330,7 @@ class Scraper:
             # Details are still fetched from Otodom itself and normal locality filters apply.
             if not link_hints and source.get("fallback_discovery_urls"):
                 for fallback_url in source["fallback_discovery_urls"]:
-                    links_http, statuses = await self._discover_http(fallback_url, pattern, 1)
+                    links_http, statuses = await self._discover_http(fallback_url, pattern, 1, source["name"])
                     http_statuses.extend(statuses)
                     for h in links_http:
                         link_hints.setdefault(h, "plot")
@@ -317,13 +338,16 @@ class Scraper:
                         discovery_methods.append("fallback-http")
                         search_pages_ok += 1
 
-            links = list(link_hints.keys())[: self.cfg["browser"].get("max_detail_pages_per_source", 80)]
+            max_details=int(source.get("max_detail_pages", self.cfg["browser"].get("max_detail_pages_per_source", 80)))
+            links = list(link_hints.keys())[:max_details]
             results = []
             detail_ok = 0
             listing_like_count = 0
             blocked_count = 0
             failed_samples = []
-            detail_parallel = max(1, int(self.cfg["browser"].get("parallel_details_per_source", 4)))
+            detail_parallel = max(1, int(source.get("parallel_details", self.cfg["browser"].get("parallel_details_per_source", 4))))
+            detail_timeout_s=float(source.get("detail_timeout_s", self.cfg["browser"].get("detail_timeout_s", 24)))
+            detail_budget_s=float(source.get("detail_budget_s", self.cfg["browser"].get("detail_budget_s", 150)))
             sem = asyncio.Semaphore(detail_parallel)
             counter = 0
             lock = asyncio.Lock()
@@ -434,21 +458,43 @@ class Scraper:
                                 print(f"       {source['name']}: szczegóły {counter}/{len(links)}", flush=True)
                     await asyncio.sleep(self.cfg["browser"].get("delay_between_pages_s", 0.15))
 
-            tasks = [asyncio.create_task(one_detail(u)) for u in links]
-            if tasks:
+            async def bounded_detail(u):
                 try:
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                    # Batches are at most ``detail_parallel`` wide, so this timeout
+                    # measures actual work, not time spent waiting behind 30 other tasks.
+                    await asyncio.wait_for(one_detail(u), timeout=detail_timeout_s)
+                except asyncio.TimeoutError:
+                    async with lock:
+                        errors.append(f"{u}: detail timeout after {detail_timeout_s:.0f}s")
                 except asyncio.CancelledError:
-                    for t in tasks:
-                        t.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
                     raise
+
+            timed_out_details=0
+            started_details=asyncio.get_running_loop().time()
+            for i in range(0,len(links),detail_parallel):
+                elapsed=asyncio.get_running_loop().time()-started_details
+                if elapsed >= detail_budget_s:
+                    skipped=len(links)-i
+                    timed_out_details += skipped
+                    errors.append(f"{source['name']}: detail budget {detail_budget_s:.0f}s exhausted; skipped {skipped} remaining")
+                    break
+                batch_links=links[i:i+detail_parallel]
+                batch=[asyncio.create_task(bounded_detail(u)) for u in batch_links]
+                remaining=max(1.0,detail_budget_s-elapsed)
+                done,pending=await asyncio.wait(batch,timeout=remaining)
+                if pending:
+                    timed_out_details += len(pending)
+                    for t in pending: t.cancel()
+                    await asyncio.gather(*pending,return_exceptions=True)
+                    errors.append(f"{source['name']}: detail budget exhausted inside batch; cancelled {len(pending)}")
+                    break
 
             diagnostics = {
                 "source": source["name"],
                 "search_pages_ok": search_pages_ok,
                 "discovered_links": len(links),
-                "detail_pages_ok": detail_ok,
+                "detail_pages_ok": listing_like_count,
+                "detail_pages_fetched": detail_ok,
                 "listing_like": listing_like_count,
                 "records": len(results),
                 "errors": len(errors),
@@ -458,6 +504,7 @@ class Scraper:
                 "discovery_methods": sorted(set(discovery_methods)),
                 "detail_methods": detail_methods,
                 "http_statuses": http_statuses[-12:],
+                "detail_timeouts_or_cancelled": timed_out_details + sum(1 for e in errors if "detail timeout after" in e),
             }
             return results, errors, diagnostics
         finally:

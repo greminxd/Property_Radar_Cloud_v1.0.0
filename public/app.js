@@ -211,7 +211,7 @@ function card(r){
     <div class="location">📍 ${esc(loc(r))} · ${esc(r.source||'?')}</div>
     <div class="numbers"><div class="num"><span>Cena</span><b>${fmtMoney(r.price)}</b></div><div class="num"><span>Powierzchnia</span><b>${fmtArea(r.area_m2)}</b></div><div class="num"><span>Cena / m²</span><b>${fmtPpm(r.price_m2)}</b></div></div>
     <div class="badges">${badges}</div>
-    ${isPlot?`<div class="market-compact"><span>📢 vs ogłoszenia <b>${pctText(marketDeltaPct(r))}</b></span><span>🏛 vs RCN <b>${pctText(rcnDeltaPct(r))}</b></span></div>`:''}
+    ${isPlot?`<div class="market-compact"><span>📢 m² vs ogłoszenia <b>${pctText(marketDeltaPct(r))}</b><small>${r.median_comparable?`${fmtPpm(r.price_m2)} vs ${fmtPpm(r.median_comparable)}`:'brak benchmarku'}</small></span><span>🏛 m² vs RCN <b>${pctText(rcnDeltaPct(r))}</b><small>${trustedRcn(r)?`${fmtPpm(r.price_m2)} vs ${fmtPpm(r.rcn_median_ppm)}`:'brak benchmarku'}</small></span></div>`:''}
     <div class="meta-line"><span>🗓 dodane na portalu: <b>${dateOnly(r.published_at)}</b></span>${r.updated_at?`<span>↻ aktualizacja: ${dateOnly(r.updated_at)}</span>`:''}<span>📡 Radar zobaczył: ${dateOnly(r.first_seen)}</span></div>
     ${archived&&r.archive_reason?`<div class="archive-note">⚠ ${esc(r.archive_reason)}</div>`:''}
     <div class="card-actions"><a class="open-btn" href="${esc(r.canonical_url)}" target="_blank" rel="noopener">Otwórz ogłoszenie</a>${phone}<button class="detail-btn" data-detail="${r.id}">Szczegóły</button></div>
@@ -245,7 +245,7 @@ async function showDetail(id){
     </div>
     ${r.area_warning?`<div class="badge warn" style="margin-top:12px">${esc(r.area_warning)}</div>`:''}
     ${isArchived(r)&&r.archive_reason?`<div class="archive-note">⚠ ${esc(r.archive_reason)}</div>`:''}
-    ${r.category==='plot'?`<h3 class="detail-section-title">Porównanie ceny</h3>${analyticsHtml(r)}<div class="comparison-summary"><b>Oferta vs ogłoszenia:</b> ${pctText(marketDelta)}<br><b>Oferta vs realne transakcje RCN:</b> ${pctText(rcnDelta)}</div>
+    ${r.category==='plot'?`<h3 class="detail-section-title">Porównanie ceny za m²</h3>${analyticsHtml(r)}<div class="comparison-summary"><b>Cena/m² oferty vs mediana ogłoszeń:</b> ${pctText(marketDelta)} (${fmtPpm(r.price_m2)} vs ${fmtPpm(r.median_comparable)})<br><b>Cena/m² oferty vs mediana transakcji RCN:</b> ${pctText(rcnDelta)} (${fmtPpm(r.price_m2)} vs ${trustedRcn(r)?fmtPpm(r.rcn_median_ppm):'—'})</div>
       <div class="history rcn-history"><h3>Ostatnie porównywalne transakcje w okolicy</h3>${rcnTx.length?rcnTx.map(t=>`<div class="tx-row"><div><b>${dateOnly(t.transaction_date)}</b><span>${t.parcel_number?`dz. ${esc(t.parcel_number)} • `:''}${fmtArea(t.area_m2)} • ${(+t.distance_km).toFixed(1)} km</span></div><strong>${fmtPpm(t.price_m2)}</strong></div>`).join(''):'<div class="muted">Brak porównywalnych transakcji RCN dla tej lokalizacji/metrażu.</div>'}</div>`:''}
     <div class="description">${esc(r.description||'Brak opisu w parserze.')}</div>
     <div class="history"><h3>Historia ceny w Radarze</h3>${history.length?history.map(x=>`<div class="history-row"><span>${dateTime(x.seen_at)}</span><b>${fmtMoney(x.price)}</b></div>`).join(''):'<div class="muted">Brak zarejestrowanych zmian ceny.</div>'}</div>

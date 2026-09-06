@@ -18,7 +18,7 @@ from app.rcn import RCNClient, RCN_PARSER_VERSION
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
-LISTING_PARSER_VERSION='1.2.6-focused-fields-sprzedajemy-v2'
+LISTING_PARSER_VERSION='1.3.0-ppm-source-timeouts'
 
 def need(name):
     v=os.getenv(name,'').strip()
@@ -90,7 +90,8 @@ async def run():
             async with sem:
                 print(f"[SCAN] {source['name']}...", flush=True)
                 try:
-                    recs,source_errors,diag=await asyncio.wait_for(scraper.collect_source(browser,source), timeout=float(cfg['browser'].get('source_timeout_s',300)))
+                    source_timeout=float(source.get('source_timeout_s',cfg['browser'].get('source_timeout_s',300)))
+                    recs,source_errors,diag=await asyncio.wait_for(scraper.collect_source(browser,source), timeout=source_timeout)
                     return source,recs,source_errors,diag
                 except asyncio.TimeoutError:
                     return source,[],[f"{source['name']}: timeout całego źródła"],{'source':source['name'],'healthy':False,'fatal':'source timeout'}

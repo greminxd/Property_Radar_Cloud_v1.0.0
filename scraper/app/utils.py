@@ -39,17 +39,28 @@ def parse_number(text: str) -> float | None:
 
 
 def parse_price(text: str) -> float | None:
-    # picks currency-looking number, tolerates spaces/NBSP
-    m = re.search(r"(\d[\d\s\xa0.,]{1,18})\s*(?:zł|PLN)\b", text or "", re.I)
+    """Parse one PLN amount without swallowing an adjacent listing/offer number.
+
+    Examples handled correctly: ``199 000 zł``, ``199000 zł``, ``97.22 zł`` and
+    ``1.250.000 zł``. The former permissive regex could merge ``nr 15365 199 000 zł``
+    into one absurd 15-billion value.
+    """
+    amount = r"(?:\d{1,3}(?:[\s\xa0.]\d{3})+|\d{4,12}|\d{1,5}(?:[.,]\d{1,2})?|\d{1,3})"
+    m = re.search(rf"(?<!\d)({amount})\s*(?:zł|PLN)\b", text or "", re.I)
     if not m:
         return None
-    raw = m.group(1).replace("\xa0", " ").strip()
-    raw = re.sub(r"\s+", "", raw)
-    # prices are normally integers; remove decimal punctuation conservatively
-    if raw.count(",") == 1 and len(raw.split(",")[-1]) <= 2:
+    raw = m.group(1).replace("\xa0", "").replace(" ", "").strip()
+    # Polish thousands separators vs decimal punctuation.
+    if "," in raw:
         raw = raw.replace(".", "").replace(",", ".")
-    else:
-        raw = raw.replace(".", "").replace(",", "")
+    elif raw.count(".") >= 1:
+        parts=raw.split(".")
+        if len(parts)>1 and all(len(x)==3 for x in parts[1:]):
+            raw="".join(parts)
+        elif len(parts)==2 and len(parts[1])<=2:
+            pass  # decimal dot, common on OLX ppm
+        else:
+            raw="".join(parts)
     try:
         return float(raw)
     except ValueError:

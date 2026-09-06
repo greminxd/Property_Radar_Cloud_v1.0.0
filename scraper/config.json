@@ -16,7 +16,9 @@
     "parallel_details_per_source": 3,
     "source_timeout_s": 300,
     "navigation_commit_timeout_ms": 12000,
-    "http_timeout_s": 12
+    "http_timeout_s": 12,
+    "detail_timeout_s": 22,
+    "detail_budget_s": 150
   },
   "filters": {
     "categories": [
@@ -115,22 +117,30 @@
         "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zdonia/",
         "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-slona/",
         "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-palesnica/"
-      ]
+      ],
+      "max_search_pages": 1,
+      "max_detail_pages": 35,
+      "parallel_details": 5,
+      "detail_timeout_s": 20,
+      "detail_budget_s": 115,
+      "source_timeout_s": 165
     },
     {
       "name": "OLX",
       "enabled": true,
       "search_urls": [
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zakliczyn/",
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zdonia/",
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-slona/",
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-palesnica/",
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-biesnik/",
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-luslawice/"
+        "https://www.olx.pl/nieruchomosci/dzialki/zakliczyn/",
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zakliczyn/"
       ],
       "detail_regex": "https?://(?:www\\.)?olx\\.pl/d/oferta/[^?#]+",
       "prefer_http_discovery": true,
-      "prefer_http_details": true
+      "prefer_http_details": true,
+      "max_search_pages": 1,
+      "max_detail_pages": 35,
+      "parallel_details": 5,
+      "detail_timeout_s": 18,
+      "detail_budget_s": 105,
+      "source_timeout_s": 150
     },
     {
       "name": "Morizon",
@@ -216,7 +226,13 @@
       ],
       "detail_regex": "https?://(?:www\\.)?tabelaofert\\.pl/oferta/[^?#,]+(?:,|%2C)\\d+",
       "prefer_http_discovery": true,
-      "prefer_http_details": true
+      "prefer_http_details": true,
+      "max_search_pages": 1,
+      "max_detail_pages": 20,
+      "parallel_details": 4,
+      "detail_timeout_s": 18,
+      "detail_budget_s": 80,
+      "source_timeout_s": 120
     }
   ],
   "rcn": {

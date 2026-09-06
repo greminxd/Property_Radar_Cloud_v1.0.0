@@ -239,6 +239,7 @@ async function systemState(env) {
 }
 
 async function databaseStats(env) {
+  // Core status must not depend on the optional v1.4.8 blacklist migration.
   const batch = await env.DB.batch([
     env.DB.prepare(`SELECT
       COUNT(*) total_rows,
@@ -255,13 +256,17 @@ async function databaseStats(env) {
     env.DB.prepare(`SELECT price_m2 FROM listings WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 5000 ORDER BY price_m2`),
     env.DB.prepare(`SELECT COALESCE(NULLIF(area_locality,''),NULLIF(location,''),'?') name, COUNT(*) n FROM listings WHERE active=1 AND category='plot' GROUP BY name ORDER BY n DESC LIMIT 20`),
     env.DB.prepare(`SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1`),
-    env.DB.prepare(`SELECT COUNT(*) blocked FROM listing_blacklist`),
   ]);
   const first=(r)=>(r?.results||[])[0]||{}, rows=(r)=>r?.results||[];
   const total=first(batch[0]), price=first(batch[1]);
   const vals=rows(batch[2]).map(x=>Number(x.price_m2)).filter(Number.isFinite);
   let med=null;if(vals.length){const m=Math.floor(vals.length/2);med=vals.length%2?vals[m]:(vals[m-1]+vals[m])/2;}
-  return {total_rows:Number(total.total_rows||0),active_rows:Number(total.active_rows||0),plots:Number(total.plots||0),active_nonplots:Number(total.active_nonplots||0),archived:Number(total.archived||0),published30:Number(total.published30||0),published7:Number(total.published7||0),unknown_date:Number(total.unknown_date||0),with_phone:Number(total.with_phone||0),...price,median_ppm:med,localities:rows(batch[3]),last_scan:first(batch[4]),blocked_urls:Number(first(batch[5]).blocked||0)};
+  let blocked=0;
+  try {
+    const b=await env.DB.prepare(`SELECT COUNT(*) blocked FROM listing_blacklist`).first();
+    blocked=Number(b?.blocked||0);
+  } catch { blocked=0; }
+  return {total_rows:Number(total.total_rows||0),active_rows:Number(total.active_rows||0),plots:Number(total.plots||0),active_nonplots:Number(total.active_nonplots||0),archived:Number(total.archived||0),published30:Number(total.published30||0),published7:Number(total.published7||0),unknown_date:Number(total.unknown_date||0),with_phone:Number(total.with_phone||0),...price,median_ppm:med,localities:rows(batch[3]),last_scan:first(batch[4]),blocked_urls:blocked};
 }
 
 function parseDiag(last) {
@@ -363,7 +368,7 @@ function databaseStatusText(s) {
 
 async function listForBot(env, mode) {
   if(mode==='price') return (await env.DB.prepare(`SELECT * FROM listings WHERE active=1 AND category='plot' AND COALESCE(source_status,'active')<>'archived' AND last_meaningful_price_change_at IS NOT NULL AND julianday(last_meaningful_price_change_at)>=julianday('now','-30 days') ORDER BY last_meaningful_price_change_at DESC LIMIT 6`).all()).results||[];
-  return (await env.DB.prepare(`SELECT * FROM listings WHERE active=1 AND category='plot' AND published_at IS NOT NULL AND julianday(published_at)>=julianday('now','-3 day') ORDER BY published_at DESC LIMIT 6`).all()).results||[];
+  return (await env.DB.prepare(`SELECT * FROM listings WHERE active=1 AND category='plot' AND julianday(COALESCE(published_at,first_seen))>=julianday('now','-3 day') ORDER BY COALESCE(published_at,first_seen) DESC LIMIT 6`).all()).results||[];
 }
 
 async function dispatchScan(env) {
@@ -599,9 +604,14 @@ async function handleApi(req, env, url) {
   if (url.pathname === '/api/status') return json(await botStatus(env),200,{'Cache-Control':'no-store, no-cache, must-revalidate'});
 
   if (url.pathname === '/api/listings') {
-    // Mini App is plots-only. Legacy houses/garages can remain in D1 for audit/history,
-    // but they are never returned to the user-facing listing browser.
-    const rows = await env.DB.prepare(`SELECT * FROM listings WHERE category='plot' AND COALESCE(source_status,'active')<>'invalid-parser' AND NOT EXISTS (SELECT 1 FROM listing_blacklist b WHERE b.canonical_url=listings.canonical_url) ORDER BY COALESCE(published_at,first_seen) DESC, id DESC LIMIT 2500`).all();
+    // Mini App is plots-only. The feed must also work before the optional blacklist
+    // migration has been run on an existing D1 database.
+    let rows;
+    try {
+      rows = await env.DB.prepare(`SELECT * FROM listings WHERE category='plot' AND COALESCE(source_status,'active')<>'invalid-parser' AND NOT EXISTS (SELECT 1 FROM listing_blacklist b WHERE b.canonical_url=listings.canonical_url) ORDER BY COALESCE(published_at,first_seen) DESC, id DESC LIMIT 2500`).all();
+    } catch {
+      rows = await env.DB.prepare(`SELECT * FROM listings WHERE category='plot' AND COALESCE(source_status,'active')<>'invalid-parser' ORDER BY COALESCE(published_at,first_seen) DESC, id DESC LIMIT 2500`).all();
+    }
     return json({ listings: rows.results || [], stats: await databaseStats(env) },200,{'Cache-Control':'no-store, no-cache, must-revalidate'});
   }
 
@@ -613,6 +623,7 @@ async function handleApi(req, env, url) {
 
   const rejectMatch = url.pathname.match(/^\/api\/listing\/(\d+)\/reject$/);
   if (rejectMatch && req.method === 'POST') {
+    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS listing_blacklist (canonical_url TEXT PRIMARY KEY, reason TEXT, source TEXT, title TEXT, created_at TEXT NOT NULL)`).run();
     if (user.role !== 'admin' && user.uid !== 'web') return json({ error:'admin required' },403);
     const id=Number(rejectMatch[1]);
     const listing=await env.DB.prepare(`SELECT id,canonical_url,source,title FROM listings WHERE id=?`).bind(id).first();

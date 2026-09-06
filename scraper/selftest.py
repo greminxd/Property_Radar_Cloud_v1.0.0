@@ -24,4 +24,4 @@ rows=[{'id':i,'canonical_url':f'https://x/{i}','category':'plot','plot_type':'bu
 t={'id':99,'canonical_url':'https://x/t','category':'plot','plot_type':'budowlana','planning_status':'wydane WZ','area_m2':1500,'price_m2':35}
 conf={'scoring':{'minimum_comparables_for_deal_score':3,'deal_thresholds':{'mega':.65,'deal':.8,'good':.95,'market':1.1,'expensive':1.4}}}
 enrich_scores(t,rows,conf);assert t['median_comparable'] and t['comparable_count']>=3
-print('SELFTEST OK v1.4.8')
+print('SELFTEST OK v1.4.9')

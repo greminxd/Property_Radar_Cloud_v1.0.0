@@ -1,8 +1,9 @@
 from __future__ import annotations
 import asyncio, re
-from .utils import canonical_url
+from .utils import canonical_url, clean_text
 from .parser import parse_detail, refine_from_rendered_text
 from .utils import phone_candidates
+from .classify import classify_category
 
 
 class Scraper:
@@ -55,7 +56,7 @@ class Scraper:
     @staticmethod
     def _hint_from_search_url(url: str) -> str:
         u=(url or '').lower()
-        return 'garage' if any(k in u for k in ['garaz','garaż','parking']) else 'plot'
+        return 'plot'
 
     async def collect_source(self,browser,source):
         """Return (records, errors, diagnostics) with bounded, parallel detail scraping."""
@@ -104,10 +105,26 @@ class Scraper:
                 async with sem:
                     p=await context.new_page()
                     try:
-                        html=await self._goto(p,u,reveal_phone=True)
+                        await self._goto(p,u,reveal_phone=True)
+                        # Dynamic portals (Otodom/OLX/Gratka/Tabelaofert) often render the
+                        # actual offer a moment after DOMContentLoaded. Wait briefly for H1,
+                        # then parse the *settled* DOM instead of the early snapshot.
+                        try:
+                            await p.locator("h1").first.wait_for(state="visible", timeout=3500)
+                        except Exception:
+                            pass
+                        try:
+                            html=await p.content()
+                        except Exception:
+                            html=""
                         rec=parse_detail(html,u,source["name"],category_hint=link_hints.get(u))
-                        try: visible=await p.locator("body").inner_text(timeout=1800)
+                        try: visible=await p.locator("body").inner_text(timeout=2500)
                         except Exception: visible=""
+                        try: h1=clean_text(await p.locator("h1").first.inner_text(timeout=1200))
+                        except Exception: h1=""
+                        if h1 and (not rec.get("title") or len(rec.get("title") or "") < 8 or rec.get("title"," ").lower().startswith(("otodom","olx","gratka","tabelaofert"))):
+                            rec["title"]=h1[:500]
+                        rec["category"]=classify_category(rec.get("title") or "",u,visible,category_hint=link_hints.get(u))
                         try: tel_hrefs=await p.locator('a[href^="tel:"]').evaluate_all("els => els.map(e => e.href)")
                         except Exception: tel_hrefs=[]
                         if not rec.get("phone"):

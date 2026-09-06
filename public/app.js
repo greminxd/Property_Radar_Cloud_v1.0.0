@@ -109,7 +109,7 @@ function hydrateFilters(){
   const plans=[...new Set(listings.filter(x=>x.category==='plot').map(x=>x.planning_status||'nieustalone'))].sort((a,b)=>a.localeCompare(b,'pl'));
   const places=[...new Set(listings.map(loc))].filter(x=>x!=='lokalizacja nieustalona').sort((a,b)=>a.localeCompare(b,'pl'));
   const sources=[...new Set(listings.map(x=>x.source).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'pl'));
-  choices('#categoryFilters',['plot','garage'],state.categories,{plot:'Działki',garage:'Garaże'});
+  choices('#categoryFilters',['plot'],state.categories,{plot:'Działki'});
   choices('#typeFilters',types,state.types); choices('#planningFilters',plans,state.planning);
   choices('#localityFilters',places,state.localities); choices('#sourceFilters',sources,state.sources);
 }
@@ -192,7 +192,7 @@ function card(r){
   const phone=r.phone?`<a class="phone-btn" href="tel:${esc(r.phone)}">☎ ${esc(r.phone)}</a>`:`<div class="phone-btn disabled">☎ telefon brak / ukryty</div>`;
   const img=r.image_url?`<img src="${esc(r.image_url)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">`:'';
   const badges=[
-    archived?badge('ARCHIWALNA','warn'):'', badge(isPlot?(r.plot_type||'nieustalona'):'garaż','blue'), isPlot?badge(r.planning_status||'nieustalone'):'',
+    archived?badge('ARCHIWALNA','warn'):'', badge(r.plot_type||'nieustalona','blue'), badge(r.planning_status||'nieustalone'),
     badge(sizeBadge(r.area_m2)),r.area_warning?badge('⚠ metraż','warn'):'',r.phone?badge('☎ telefon','good'):'',r.parcel_number?badge('🗺 nr działki','good'):'',
     r.last_meaningful_price_change_at?badge('📉 zmiana ceny','hot'):''
   ].join('');
@@ -225,7 +225,7 @@ async function showDetail(id){
   const marketDelta=marketDeltaPct(r),rcnDelta=rcnDeltaPct(r);
   $('#detailBody').innerHTML=`<div class="detail-content"><h2>${esc(r.title||'Oferta')}</h2><div class="location">📍 ${esc(loc(r))} · ${r.distance_km==null?'?':(+r.distance_km).toFixed(1)} km · ${esc(r.source)}</div>
     <div class="detail-grid">
-      ${[['Cena',fmtMoney(r.price)],['Powierzchnia',fmtArea(r.area_m2)],['Cena/m²',fmtPpm(r.price_m2)],['Status',isArchived(r)?'archiwalna / nieaktywna':'aktywna'],['Typ',r.category==='garage'?'garaż':r.plot_type||'nieustalona'],['Plan / WZ',r.planning_status||'nieustalone'],['Nr działki',r.parcel_number||'—'],['Telefon',r.phone||'brak / ukryty'],['Pierwotnie dodane',dateOnly(r.published_at)],['Ostatnia aktualizacja',dateOnly(r.updated_at)],['Radar pierwszy raz',dateTime(r.first_seen)],['Portal',r.source||'—']].map(([a,b])=>`<div class="detail-item"><span>${esc(a)}</span><b>${esc(b)}</b></div>`).join('')}
+      ${[['Cena',fmtMoney(r.price)],['Powierzchnia',fmtArea(r.area_m2)],['Cena/m²',fmtPpm(r.price_m2)],['Status',isArchived(r)?'archiwalna / nieaktywna':'aktywna'],['Typ',r.plot_type||'nieustalona'],['Plan / WZ',r.planning_status||'nieustalone'],['Nr działki',r.parcel_number||'—'],['Telefon',r.phone||'brak / ukryty'],['Pierwotnie dodane',dateOnly(r.published_at)],['Ostatnia aktualizacja',dateOnly(r.updated_at)],['Radar pierwszy raz',dateTime(r.first_seen)],['Portal',r.source||'—']].map(([a,b])=>`<div class="detail-item"><span>${esc(a)}</span><b>${esc(b)}</b></div>`).join('')}
     </div>
     ${r.area_warning?`<div class="badge warn" style="margin-top:12px">${esc(r.area_warning)}</div>`:''}
     ${isArchived(r)&&r.archive_reason?`<div class="archive-note">⚠ ${esc(r.archive_reason)}</div>`:''}

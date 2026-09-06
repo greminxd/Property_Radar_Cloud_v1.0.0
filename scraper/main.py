@@ -198,14 +198,14 @@ async def run():
         try: tg.send(listing_message(r,kind,old_price),r.get('canonical_url'),r.get('image_url'))
         except Exception as e:errs.append('Telegram: '+str(e))
 
-    plots=sum(1 for x in unique if x.get('category')=='plot'); garages=sum(1 for x in unique if x.get('category')=='garage');phones=sum(1 for x in unique if x.get('phone'))
+    plots=sum(1 for x in unique if x.get('category')=='plot'); phones=sum(1 for x in unique if x.get('phone'))
     ppms=[float(x['price_m2']) for x in unique if x.get('category')=='plot' and x.get('price_m2') and 1<=float(x['price_m2'])<=5000]
     market_line=f"mediana {median(ppms):.1f} zł/m² • średnia {mean(ppms):.1f} zł/m²" if ppms else 'brak danych cenowych'
     rvals=[float(x['price_m2']) for x in rcn_rows if x.get('price_m2')]
     rcn_line=f"RCN mediana {median(rvals):.1f} • średnia {mean(rvals):.1f} zł/m² ({len(rvals)} trans.)" if rvals else 'RCN: brak/awaria'
     healthy_count=sum(1 for d in diagnostics if d.get('healthy'))
     summary=(f"🏡 <b>PROPERTY RADAR — SKAN GOTOWY</b>\n"
-             f"🟢 Aktywne: {plots} działek • {garages} garaży\n"
+             f"🟢 Aktywne działki: {plots}\n"
              f"🔎 Pobrano: {len(all_recs)} • przyjęto: {len(accepted)} • źródła OK: {healthy_count}/{len(diagnostics)}\n"
              f"🆕 Faktycznie nowe: {fresh_new} • odkryte pierwszy raz: {discovered_new} • 📉 istotne zmiany cen: {meaningful_changes}\n"
              f"📢 {market_line}\n🏛 {rcn_line}\n"

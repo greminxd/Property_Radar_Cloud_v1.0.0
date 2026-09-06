@@ -35,6 +35,59 @@ def jsonld_objects(soup):
     return objs
 
 
+
+def embedded_json_objects(soup):
+    """Parse JSON payloads used by JS-heavy portals, not only JSON-LD.
+
+    OLX/Otodom in particular keep useful listing fields in application/json /
+    __NEXT_DATA__ payloads. Invalid or huge non-JSON scripts are ignored.
+    """
+    out=[]
+    for tag in soup.find_all("script"):
+        typ=(tag.get("type") or "").lower(); ident=(tag.get("id") or "").lower()
+        if typ not in {"application/json","application/ld+json"} and ident not in {"__next_data__","__nuxt_data__"}:
+            continue
+        raw=(tag.string or tag.get_text() or "").strip()
+        if not raw or len(raw)>5_000_000: continue
+        try:
+            data=json.loads(raw)
+            out.append(data)
+        except Exception:
+            pass
+    return out
+
+def _walk_dicts(obj):
+    stack=[obj]
+    while stack:
+        x=stack.pop()
+        if isinstance(x,dict):
+            yield x
+            stack.extend(x.values())
+        elif isinstance(x,list): stack.extend(x)
+
+def _embedded_first(payloads, keys):
+    wanted={asciifold(k).replace('_','').replace('-','') for k in keys}
+    for payload in payloads:
+        for d in _walk_dicts(payload):
+            for k,v in d.items():
+                kk=asciifold(str(k)).replace('_','').replace('-','')
+                if kk in wanted and v not in (None,"",[],{}):
+                    return v
+    return None
+
+def _embedded_price(payloads):
+    for keyset in [
+        ["totalPrice","priceValue","price"],
+        ["amount","value"],
+    ]:
+        v=_embedded_first(payloads,keyset)
+        if isinstance(v,dict): v=v.get('value') or v.get('amount')
+        try:
+            n=float(str(v).replace(' ','').replace('\xa0','').replace(',','.'))
+            if 100 <= n <= 1_000_000_000: return n
+        except Exception: pass
+    return None
+
 def _find_meta(soup, *names):
     for name in names:
         tag=soup.find("meta", attrs={"property":name}) or soup.find("meta", attrs={"name":name})
@@ -194,8 +247,11 @@ def _explicit_plot_area(text: str) -> tuple[float | None,str | None,str | None]:
 def parse_detail(html: str, url: str, source: str, category_hint: str | None = None):
     soup=BeautifulSoup(html,"lxml")
     objs=jsonld_objects(soup)
+    payloads=embedded_json_objects(soup)
     body=clean_text(soup.get_text(" ", strip=True))
-    title=_find_meta(soup,"og:title","twitter:title") or clean_text((soup.title.string if soup.title else ""))
+    meta_title=_find_meta(soup,"og:title","twitter:title") or clean_text((soup.title.string if soup.title else ""))
+    h1=clean_text((soup.find("h1").get_text(" ",strip=True) if soup.find("h1") else ""))
+    title=h1 if h1 and len(h1)>=8 else meta_title
     desc=_find_meta(soup,"og:description","description")
     if not desc:
         # Prefer visible main/article content over the whole footer-heavy page.
@@ -221,6 +277,7 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
         if not published: published=clean_text(str(o.get("datePosted") or o.get("datePublished") or ""))
         if not updated: updated=clean_text(str(o.get("dateModified") or ""))
 
+    if price is None: price=_embedded_price(payloads)
     if price is None: price=parse_price(combined)
 
     # Determine object type before choosing an area. A house page can contain both
@@ -240,10 +297,16 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
         awarn=area_warning(combined)
     phone=_phone_from_soup(soup, desc+" "+body)
     if not published:
-        dm=re.search(r"(?:Dodano|Dodane|Opublikowano|Data dodania|Data publikacji)\s*[:–-]?\s*([^|\n]{4,55})", combined, re.I)
+        v=_embedded_first(payloads,["datePosted","datePublished","publishedAt","createdAt","createdDate","creationDate"])
+        if isinstance(v,str): published=clean_text(v)
+    if not updated:
+        v=_embedded_first(payloads,["dateModified","updatedAt","lastModified","refreshDate","pushedAt"])
+        if isinstance(v,str): updated=clean_text(v)
+    if not published:
+        dm=re.search(r"(?:Dodano|Dodane|Dodano dnia|Dodane dnia|Opublikowano|Data dodania|Data publikacji)\s*[:–-]?\s*([^|\n]{4,55})", combined, re.I)
         if dm: published=clean_text(dm.group(1))
     if not updated:
-        um=re.search(r"(?:Aktualizacja|Zaktualizowano|Zaktualizowane|Zaktualizowana|Odświeżono|Odswiezono|Odświeżone|Odswiezone|Data aktualizacji)\s*[:–-]?\s*([^|\n]{4,55})", combined, re.I)
+        um=re.search(r"(?:Aktualizacja|Zaktualizowano|Zaktualizowane|Zaktualizowana|Odświeżono(?: dnia)?|Odswiezono(?: dnia)?|Odświeżone|Odswiezone|Podbite|Data aktualizacji)\s*[:–-]?\s*([^|\n]{4,55})", combined, re.I)
         if um: updated=clean_text(um.group(1))
 
     af=asciifold(combined[:12000])
@@ -275,6 +338,9 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
     plan=planning_status(combined) if cat=="plot" else "n/d"
     parcel=parcel_number(combined) if cat=="plot" else None
     image=_find_meta(soup,"og:image","twitter:image") or None
+    if not image:
+        iv=_embedded_first(payloads,["imageUrl","image","thumbnailUrl","photoUrl"])
+        if isinstance(iv,str) and iv.startswith("http"): image=iv
 
     return {
         "canonical_url": canonical_url(url,url), "source":source, "category":cat,
@@ -299,7 +365,16 @@ def refine_from_rendered_text(rec: dict, visible_text: str) -> dict:
     text=clean_text(visible_text or "")
     if not text:
         return rec
-    early=text[:6500]
+    early=text[:9000]
+    # Dynamic page fallback: recover the core listing fields from rendered text.
+    if rec.get("price") is None:
+        rec["price"]=parse_price(early)
+    if rec.get("area_m2") is None and rec.get("category")=="plot":
+        a,_,_= _explicit_plot_area(early)
+        if a is None: a,_=best_area(early)
+        if a is not None: rec["area_m2"]=a
+    if rec.get("price") and rec.get("area_m2"):
+        rec["price_m2"]=rec["price"]/rec["area_m2"]
     loc_fold=asciifold(rec.get("location") or "")
     if loc_fold in {"", "zakliczyn", "gmina zakliczyn", "powiat tarnowski", "tarnowski", "malopolskie"}:
         ef=asciifold(early)
@@ -326,10 +401,10 @@ def refine_from_rendered_text(rec: dict, visible_text: str) -> dict:
         if rec.get("planning_status") in {None,"","nieustalone"}:
             rec["planning_status"]=planning_status(early)
     if not rec.get("published_text"):
-        dm=re.search(r"(?:Dodano|Dodane|Opublikowano|Data dodania|Data publikacji)\s*[:–-]?\s*([^|\n]{4,55})", early, re.I)
+        dm=re.search(r"(?:Dodano|Dodane|Dodano dnia|Dodane dnia|Opublikowano|Data dodania|Data publikacji)\s*[:–-]?\s*([^|\n]{4,55})", early, re.I)
         if dm: rec["published_text"]=clean_text(dm.group(1))[:100]
     if not rec.get("updated_text"):
-        um=re.search(r"(?:Aktualizacja|Zaktualizowano|Zaktualizowane|Zaktualizowana|Odświeżono|Odswiezono|Odświeżone|Odswiezone|Data aktualizacji)\s*[:–-]?\s*([^|\n]{4,55})", early, re.I)
+        um=re.search(r"(?:Aktualizacja|Zaktualizowano|Zaktualizowane|Zaktualizowana|Odświeżono(?: dnia)?|Odswiezono(?: dnia)?|Odświeżone|Odswiezone|Podbite|Data aktualizacji)\s*[:–-]?\s*([^|\n]{4,55})", early, re.I)
         if um: rec["updated_text"]=clean_text(um.group(1))[:100]
     af=asciifold(early)
     if any(x in af for x in ['ogloszenie archiwalne','oferta archiwalna','ogloszenie nieaktualne','oferta nieaktualna','ta oferta jest nieaktualna']):

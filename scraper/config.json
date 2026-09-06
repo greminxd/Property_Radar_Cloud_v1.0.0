@@ -18,8 +18,7 @@
   },
   "filters": {
     "categories": [
-      "plot",
-      "garage"
+      "plot"
     ]
   },
   "retention": {
@@ -104,8 +103,7 @@
       "name": "Otodom",
       "enabled": true,
       "search_urls": [
-        "https://www.otodom.pl/pl/wyniki/sprzedaz/dzialka/malopolskie/tarnowski/zakliczyn/biesnik?ownerTypeSingleSelect=ALL&distanceRadius=10",
-        "https://www.otodom.pl/pl/wyniki/sprzedaz/garaz/malopolskie/tarnowski/zakliczyn/biesnik?ownerTypeSingleSelect=ALL&distanceRadius=10"
+        "https://www.otodom.pl/pl/wyniki/sprzedaz/dzialka/malopolskie/tarnowski/zakliczyn/biesnik?ownerTypeSingleSelect=ALL&distanceRadius=10"
       ],
       "detail_regex": "https?://(?:www\\.)?otodom\\.pl/pl/oferta/[^?#]+"
     },
@@ -116,8 +114,7 @@
         "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/zakliczyn/",
         "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zdonia/",
         "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-slona/",
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-palesnica/",
-        "https://www.olx.pl/nieruchomosci/garaze-parkingi/sprzedaz/zakliczyn/"
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-palesnica/"
       ],
       "detail_regex": "https?://(?:www\\.)?olx\\.pl/d/oferta/[^?#]+"
     },
@@ -125,8 +122,7 @@
       "name": "Morizon",
       "enabled": true,
       "search_urls": [
-        "https://www.morizon.pl/dzialki/tarnowski/zakliczyn/",
-        "https://www.morizon.pl/garaze/tarnowski/zakliczyn/"
+        "https://www.morizon.pl/dzialki/tarnowski/zakliczyn/"
       ],
       "detail_regex": "https?://(?:www\\.)?morizon\\.pl/oferta/[^?#]+"
     },
@@ -134,17 +130,15 @@
       "name": "Gratka",
       "enabled": true,
       "search_urls": [
-        "https://gratka.pl/nieruchomosci/dzialki-grunty/gmina-zakliczyn",
-        "https://gratka.pl/nieruchomosci/garaze/gmina-zakliczyn"
+        "https://gratka.pl/nieruchomosci/dzialki-grunty/gmina-zakliczyn"
       ],
-      "detail_regex": "https?://(?:www\\.)?gratka\\.pl/nieruchomosci/[^?#]+"
+      "detail_regex": "https?://(?:www\\.)?gratka\\.pl/nieruchomosci/[^?#]+/ob/\\d+"
     },
     {
       "name": "Nieruchomosci-online",
       "enabled": true,
       "search_urls": [
-        "https://zakliczyn.nieruchomosci-online.pl/dzialki,sprzedaz/",
-        "https://zakliczyn.nieruchomosci-online.pl/garaze,sprzedaz/"
+        "https://zakliczyn.nieruchomosci-online.pl/dzialki,sprzedaz/"
       ],
       "detail_regex": "https?://[^/]*nieruchomosci-online\\.pl/[^?#]*\\d+\\.html"
     },
@@ -152,8 +146,7 @@
       "name": "Adresowo",
       "enabled": true,
       "search_urls": [
-        "https://adresowo.pl/dzialki/gmina-zakliczyn/",
-        "https://adresowo.pl/garaze/gmina-zakliczyn/"
+        "https://adresowo.pl/dzialki/gmina-zakliczyn/"
       ],
       "detail_regex": "https?://(?:www\\.)?adresowo\\.pl/o/[^?#]+"
     },
@@ -161,8 +154,7 @@
       "name": "Domiporta",
       "enabled": true,
       "search_urls": [
-        "https://www.domiporta.pl/dzialka/sprzedam/malopolskie/zakliczyn",
-        "https://www.domiporta.pl/garaz/sprzedam/malopolskie/zakliczyn"
+        "https://www.domiporta.pl/dzialka/sprzedam/malopolskie/zakliczyn"
       ],
       "detail_regex": "https?://(?:www\\.)?domiporta\\.pl/nieruchomosci/[^?#]+"
     },
@@ -170,8 +162,7 @@
       "name": "Sprzedajemy",
       "enabled": true,
       "search_urls": [
-        "https://sprzedajemy.pl/zakliczyn/nieruchomosci/dzialki-grunty",
-        "https://sprzedajemy.pl/zakliczyn/nieruchomosci/garaze-parkingi"
+        "https://sprzedajemy.pl/zakliczyn/nieruchomosci/dzialki-grunty"
       ],
       "detail_regex": "https?://(?:www\\.)?sprzedajemy\\.pl/[^?#]+"
     },
@@ -180,8 +171,7 @@
       "enabled": true,
       "search_urls": [
         "https://zakliczyn.lento.pl/nieruchomosci/dzialki-i-grunty.html",
-        "https://zakliczyn.lento.pl/nieruchomosci-w-okolicy/dzialki-i-grunty.html",
-        "https://zakliczyn.lento.pl/nieruchomosci/garaze-i-parkingi.html"
+        "https://zakliczyn.lento.pl/nieruchomosci-w-okolicy/dzialki-i-grunty.html"
       ],
       "detail_regex": "https?://[^/]+\\.lento\\.pl/[^?#]+(?:,|%2C)\\d+\\.html"
     },
@@ -189,19 +179,17 @@
       "name": "Oferty.net",
       "enabled": true,
       "search_urls": [
-        "https://www.oferty.net/dzialki,zakliczyn",
-        "https://www.oferty.net/garaze,zakliczyn"
+        "https://www.oferty.net/dzialki,zakliczyn"
       ],
-      "detail_regex": "https?://(?:m\\.|www\\.)?oferty\\.net/(?:dzialka|garaz)-na-sprzedaz-[^?#]+"
+      "detail_regex": "https?://(?:m\\.|www\\.)?oferty\\.net/dzialka-na-sprzedaz-[^?#]+"
     },
     {
       "name": "Tabelaofert",
       "enabled": true,
       "search_urls": [
-        "https://tabelaofert.pl/sprzedaz/dzialki/zakliczyn",
-        "https://tabelaofert.pl/sprzedaz/garaze/zakliczyn"
+        "https://tabelaofert.pl/sprzedaz/dzialki/zakliczyn"
       ],
-      "detail_regex": "https?://(?:www\\.)?tabelaofert\\.pl/oferta/[^?#]+"
+      "detail_regex": "https?://(?:www\\.)?tabelaofert\\.pl/oferta/[^?#,]+(?:,|%2C)\\d+"
     }
   ],
   "rcn": {

@@ -1,10 +1,11 @@
 from datetime import datetime, timezone, timedelta
-from app.parser import parse_detail
+from app.parser import parse_detail, refine_from_rendered_text
 from app.area import area_accepts
 from app.utils import fingerprint
 from app.scoring import enrich_scores
 from app.dates import normalize_published
 from app.rcn import RCNClient
+from app.classify import classify_category
 
 html='''<html><head><meta property="og:title" content="Działka rolno-budowlana Zdonia 15 ar"><meta property="og:description" content="Zdonia, gm. Zakliczyn. Wydane warunki zabudowy. Nr działki 187/22. Telefon 600 123 456."><script type="application/ld+json">{"@type":"Offer","datePublished":"2026-09-05","dateModified":"2026-09-06"}</script></head><body><main>Powierzchnia 15 m2, faktycznie 15 ar. Cena 99 000 zł. Zdonia gm. Zakliczyn. Wydane WZ. Kontakt telefon 600 123 456.</main></body></html>'''
 r=parse_detail(html,'https://example.com/dzialka-test','TEST','plot')
@@ -25,7 +26,7 @@ Cena 1 250 000 zł. Powierzchnia domu 350 m². Powierzchnia działki <b>37000 m�
 </main></body></html>"""
 h = parse_detail(house_html,'https://example.com/dom-350m-374ha','TEST','plot')
 assert h['area_m2'] == 37000, h
-assert h['category'] == 'other', h  # radar is plots + garages only
+assert h['category'] == 'other', h  # radar is plots only
 
 # Labelled plot field also wins over unrelated dimensions in a genuine plot listing.
 plot_html = """<html><head><meta property='og:title' content='Działka Zakliczyn 3.74 ha'></head><body><main>
@@ -64,4 +65,14 @@ res=rc.analyze({'category':'plot','area_m2':1500,'lat':49.82625,'lon':20.8099},t
 assert res['rcn_count']>=3 and res['rcn_median_ppm']>0,res
 
 assert normalize_published('28 sierpnia 2026') is not None
-print('SELFTEST OK')
+
+# v1.2.2: garage must never enter radar
+assert classify_category("Garaż murowany 18 m2", "https://x/garaz/123", "", "plot") == "other"
+
+# v1.2.2: JS-heavy/detail fallback must recover price + explicit plot area
+r={"category":"plot","title":"Działka Zakliczyn","price":None,"area_m2":None,"price_m2":None,"location":"Zakliczyn","plot_type":"nieustalona","planning_status":"nieustalone","published_text":"","updated_text":"","phone":None,"parcel_number":None}
+r=refine_from_rendered_text(r,"Powierzchnia działki: 5 400 m² Cena 199 000 zł Dodane 1 września 2026 Zakliczyn")
+assert r["area_m2"] == 5400, r
+assert r["price"] == 199000, r
+
+print('SELFTEST OK v1.2.2')

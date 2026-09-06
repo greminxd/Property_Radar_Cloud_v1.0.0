@@ -232,7 +232,6 @@ async function systemState(env) {
 async function databaseStats(env) {
   const total = await env.DB.prepare(`SELECT
       SUM(CASE WHEN active=1 AND category='plot' THEN 1 ELSE 0 END) plots,
-      SUM(CASE WHEN active=1 AND category='garage' THEN 1 ELSE 0 END) garages,
       SUM(CASE WHEN active=0 OR source_status='archived' THEN 1 ELSE 0 END) archived,
       SUM(CASE WHEN active=1 AND category='plot' AND published_at IS NOT NULL AND julianday(published_at)>=julianday('now','-30 day') THEN 1 ELSE 0 END) published30,
       SUM(CASE WHEN active=1 AND category='plot' AND published_at IS NOT NULL AND julianday(published_at)>=julianday('now','-7 day') THEN 1 ELSE 0 END) published7,
@@ -291,7 +290,7 @@ function statusLongText(s) {
 
 function databaseStatusText(s) {
   const loc=(s.localities||[]).map(x=>`${escapeHtml(x.name)}: <b>${x.n}</b>`).join(' • ')||'—';
-  return [`🗃 <b>STATUS BAZY</b>`,`🏡 Aktywne działki: <b>${s.plots||0}</b> • garaże: ${s.garages||0}`,`🕘 Dodane ≤7 dni: ${s.published7||0} • ≤30 dni: <b>${s.published30||0}</b>`,`❓ Bez daty publikacji: ${s.unknown_date||0} • archiwalne/nieaktywne: ${s.archived||0}`,
+  return [`🗃 <b>STATUS BAZY</b>`,`🏡 Aktywne działki: <b>${s.plots||0}</b>`,`🕘 Dodane ≤7 dni: ${s.published7||0} • ≤30 dni: <b>${s.published30||0}</b>`,`❓ Bez daty publikacji: ${s.unknown_date||0} • archiwalne/nieaktywne: ${s.archived||0}`,
     `☎️ Z telefonem: ${s.with_phone||0}`,``,`📢 <b>CENY Z OGŁOSZEŃ</b>`,`mediana: <b>${s.median_ppm==null?'—':ppm(s.median_ppm)}</b> • średnia: ${s.avg_ppm==null?'—':ppm(s.avg_ppm)}`,
     ``,`🏛 <b>REALNE TRANSAKCJE RCN — 24 mies.</b>`,`mediana: <b>${s.rcn_median_ppm==null?'—':ppm(s.rcn_median_ppm)}</b> • średnia: ${s.rcn_mean_ppm==null?'—':ppm(s.rcn_mean_ppm)}`,`transakcje: ${s.rcn_count||0} • ostatnia: ${plDateOnly(s.rcn_last_date)}${s.rcn_last_ppm?` • ${ppm(s.rcn_last_ppm)}`:''}`,
     ``,`📍 <b>AKTYWNE WG MIEJSCOWOŚCI</b>`,loc].join('\n');

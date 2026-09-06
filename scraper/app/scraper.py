@@ -234,6 +234,8 @@ class Scraper:
         next_data_pages=0
         next_data_items=0
         browser_search_fallbacks=0
+        html_discovery_pages=0
+        html_discovery_links=0
         max_pages=max(1,int(source.get("max_search_pages",1)))
         attempts=max(1,int(source.get("http_retries",3)))
 
@@ -246,12 +248,26 @@ class Scraper:
                 items=self._otodom_search_items(payload)
                 if payload is not None:
                     next_data_pages += 1
+                # Otodom's search payload changes often. Always supplement __NEXT_DATA__
+                # with canonical /pl/oferta/ links already present in the HTML. This is
+                # intentionally selector-free and survives card/CSS redesigns.
+                page_links=[]
+                if status==200 and html:
+                    try:
+                        raw_links,_=self._extract_links_from_html(final_url or u,html,pattern)
+                        page_links.extend(raw_links)
+                        if raw_links:
+                            html_discovery_pages += 1
+                            html_discovery_links += len(raw_links)
+                    except Exception as e:
+                        errors.append(f"{u}: Otodom HTML link discovery {type(e).__name__}: {e}")
                 if items:
                     next_data_items += len(items)
                     for item in items:
                         v=self._otodom_item_url(item)
-                        if v and pattern.match(v): links.append(v)
-                    # Empty next page means pagination is finished.
+                        if v and pattern.match(v): page_links.append(v)
+                if page_links:
+                    links.extend(page_links)
                     continue
                 # The new collector deliberately does not scrape card CSS. One lightweight
                 # browser attempt may still expose __NEXT_DATA__ if raw HTTP was challenged.
@@ -265,11 +281,21 @@ class Scraper:
                         bitems=self._otodom_search_items(payload)
                         browser_search_fallbacks += 1
                         if payload is not None: next_data_pages += 1
+                        browser_page_links=[]
+                        try:
+                            hrefs=await self._browser_hrefs(page)
+                            for href in hrefs:
+                                v=canonical_url(u,href)
+                                if pattern.match(v): browser_page_links.append(v)
+                        except Exception:
+                            pass
                         if bitems:
                             next_data_items += len(bitems)
                             for item in bitems:
                                 v=self._otodom_item_url(item)
-                                if v and pattern.match(v): links.append(v)
+                                if v and pattern.match(v): browser_page_links.append(v)
+                        if browser_page_links:
+                            links.extend(browser_page_links)
                     except Exception as e:
                         errors.append(f"{u}: browser search fallback {type(e).__name__}: {e}")
                     finally:
@@ -348,7 +374,7 @@ class Scraper:
                 break
             print(f"       Otodom: szczegóły {min(i+detail_parallel,len(links))}/{len(links)}",flush=True)
 
-        healthy=bool(next_data_pages and links and detail_ok and results)
+        healthy=bool(links and detail_ok and results and (next_data_pages or html_discovery_pages or browser_search_fallbacks))
         diag={
             "source":"Otodom",
             "search_pages_ok":next_data_pages,
@@ -361,7 +387,7 @@ class Scraper:
             "blocked":blocked,
             "failed_samples":failed,
             "healthy":healthy,
-            "discovery_methods":["next-data"] + (["browser-next-data"] if browser_search_fallbacks else []),
+            "discovery_methods":(["next-data"] if next_data_pages else []) + (["html-links"] if html_discovery_pages else []) + (["browser-links/next-data"] if browser_search_fallbacks else []),
             "detail_methods":{"http-next-data":detail_ok,"browser":0},
             "http_statuses":statuses[-12:],
             "http_attempt_statuses":retry_statuses[-24:],
@@ -370,11 +396,13 @@ class Scraper:
             "next_data_pages":next_data_pages,
             "next_data_items":next_data_items,
             "browser_search_fallbacks":browser_search_fallbacks,
+            "html_discovery_pages":html_discovery_pages,
+            "html_discovery_links":html_discovery_links,
             "detail_timeouts_or_cancelled":timeout_count,
-            "collector":"otodom-next-data-v1",
+            "collector":"otodom-next-data-html-v2",
         }
         if not links:
-            errors.append("Otodom: __NEXT_DATA__ nie zwrócił linków searchAds.items")
+            errors.append("Otodom: brak linków ofert z __NEXT_DATA__, HTML i browser fallback")
             diag["errors"]=len(errors)
         return results,errors,diag
 
@@ -653,6 +681,7 @@ class Scraper:
         errors=[];results=[];seen_urls=set();failed=[]
         api_statuses=[];api_attempt_statuses=[];api_items=0;api_plot_items=0
         api_pages_ok=0;api_parse_failures=0;api_records_ok=0;api_fail_fast=None
+        api_completed_queries=set();api_failed_queries=[]
         html_statuses=[];html_links=[];fallback_detail_statuses=[]
         browser_api_pages_ok=0;browser_api_statuses=[];browser_links=[];browser_detail_ok=0
         attempts=max(1,int(source.get('http_retries',3)))
@@ -668,7 +697,9 @@ class Scraper:
         # querying a stale hard-coded list.
         if source.get('query_from_area_registry',True):
             area_cfg=self.cfg.get('area') or {}
-            for q in list(area_cfg.get('primary_localities') or []) + list(area_cfg.get('nearby_localities') or []):
+            candidates=(area_cfg.get('discovery_localities') or
+                        (list(area_cfg.get('primary_localities') or []) + list(area_cfg.get('nearby_localities') or [])))
+            for q in candidates:
                 q=clean_text(str(q))
                 if q: queries.append(q)
         if not queries:
@@ -740,6 +771,7 @@ class Scraper:
                     if len(failed)<4:
                         failed.append({'url':api_url,'status':status,'reason':'api search failed','text':text[:160]})
                     if page_no==0:
+                        api_failed_queries.append(query)
                         errors.append(f'OLX API query={query!r}: HTTP {status or "transport"}')
                     # A completed retry sequence ending in 403/429 is almost always
                     # endpoint/IP-wide rather than query-specific. Do not repeat the
@@ -753,10 +785,16 @@ class Scraper:
                             api_fail_fast='2 consecutive transport failures'; stop_api=True
                     break
                 consecutive_transport_failures=0
+                api_completed_queries.add(query)
                 stats=consume_payload(payload)
                 api_pages_ok += 1;api_items += stats['items'];api_plot_items += stats['plot']
                 api_parse_failures += stats['parse_failures'];api_records_ok += stats['records']
                 if stats['items']<limit: break
+
+        # Any query not completed over bare HTTP must be retried in the browser session.
+        # v1.5.1 only retried the first four queries and only when *zero* API records
+        # were found, so a partial OLX block silently dropped Lusławice/Borowa/etc.
+        unresolved_queries=[q for q in queries if q not in api_completed_queries]
 
         # Optional supplement: ordinary category/location page can expose nearby offers
         # that do not literally contain the query word.  It is HTTP-only and tightly
@@ -773,7 +811,7 @@ class Scraper:
         # fallback: load the actual OLX result page, capture the JSON requests made by
         # OLX itself, and only if that yields nothing use the rendered offer links.
         # No CAPTCHA solving/stealth/proxying is used; a real challenge remains a block.
-        if not results and source.get('browser_session_fallback',True) and browser is not None:
+        if (unresolved_queries or not results) and source.get('browser_session_fallback',True) and browser is not None:
             context=None
             response_tasks=[]
             captured=[]
@@ -830,27 +868,27 @@ class Scraper:
                     api_items += stats['items'];api_plot_items += stats['plot']
                     api_parse_failures += stats['parse_failures'];api_records_ok += stats['records']
 
-                # If page navigation worked but OLX did not emit an API response we could
-                # capture, ask the same-origin page to fetch the public endpoint with the
-                # cookies/session OLX just established.
-                if not results:
-                    for query in queries[:4]:
-                        try:
-                            u=api_url_for(query,0)
-                            out=await page.evaluate("""async (u) => {
-                                try { const r=await fetch(u,{headers:{'Accept':'application/json'}});
-                                      return {status:r.status,text:await r.text()}; }
-                                catch(e) { return {status:0,text:String(e)}; }
-                            }""",u)
-                            st=int((out or {}).get('status') or 0);browser_api_statuses.append(st)
-                            if st!=200:
-                                continue
-                            payload=json.loads((out or {}).get('text') or '{}')
-                            stats=consume_payload(payload);browser_api_pages_ok += 1
-                            api_items += stats['items'];api_plot_items += stats['plot']
-                            api_parse_failures += stats['parse_failures'];api_records_ok += stats['records']
-                        except Exception as e:
-                            if len(failed)<4: failed.append({'url':'browser-api','status':0,'reason':f'{type(e).__name__}: {e}'})
+                # Retry every unresolved locality through the same-origin browser session.
+                # This supplements partial HTTP success too; finding one Zakliczyn record must
+                # never suppress later Lusławice/Wesołów/Borowa queries.
+                browser_queries=unresolved_queries or ([] if results else queries)
+                for query in browser_queries:
+                    try:
+                        u=api_url_for(query,0)
+                        out=await page.evaluate("""async (u) => {
+                            try { const r=await fetch(u,{headers:{'Accept':'application/json'}});
+                                  return {status:r.status,text:await r.text()}; }
+                            catch(e) { return {status:0,text:String(e)}; }
+                        }""",u)
+                        st=int((out or {}).get('status') or 0);browser_api_statuses.append(st)
+                        if st!=200:
+                            continue
+                        payload=json.loads((out or {}).get('text') or '{}')
+                        stats=consume_payload(payload);browser_api_pages_ok += 1
+                        api_items += stats['items'];api_plot_items += stats['plot']
+                        api_parse_failures += stats['parse_failures'];api_records_ok += stats['records']
+                    except Exception as e:
+                        if len(failed)<4: failed.append({'url':'browser-api','status':0,'reason':f'{type(e).__name__}: {e}'})
 
                 # Last self-contained fallback: rendered OLX result links, with a small
                 # browser detail cap. This is intentionally bounded so OLX cannot consume
@@ -951,9 +989,10 @@ class Scraper:
             'api_attempt_statuses':api_attempt_statuses[-24:],'fallback_detail_statuses':fallback_detail_statuses[-12:],
             'api_pages_ok':api_pages_ok,'api_items':api_items,'api_plot_items':api_plot_items,
             'api_parse_failures':api_parse_failures,'api_records_ok':api_records_ok,'api_queries':queries,
+            'api_unresolved_queries':unresolved_queries,'api_failed_queries':list(dict.fromkeys(api_failed_queries)),
             'api_fail_fast':api_fail_fast,'browser_api_pages_ok':browser_api_pages_ok,
             'browser_api_statuses':browser_api_statuses[-12:],'browser_links':len(browser_links),
-            'html_supplement_links':len(html_links),'collector':'olx-public-api-v2-browser-session-fallback',
+            'html_supplement_links':len(html_links),'collector':'olx-public-api-v3-all-query-fallback',
             'detail_timeouts_or_cancelled':sum(1 for e in errors if 'timeout' in e.lower()),
         }
         if not results:

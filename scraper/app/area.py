@@ -232,6 +232,25 @@ def area_accepts(record: dict, area_cfg: dict, distance_km: float | None) -> tup
         structured_hits=_find_names(record.get('location') or '', list(dict.fromkeys(allowed+known_gmina+known_outside)))
         if not structured_hits and (record.get('location') or '').strip():
             return False, None, 'olx-structured-location-outside-target'
+
+    # v1.5.2: the production radar is truly geographic. Candidate offers may come
+    # from neighbouring municipalities; they are accepted only after a real/derived
+    # coordinate is within the configured radius around Bieśnik. Missing coordinates
+    # are not silently accepted. Keep the dedicated same-name Zakliczyn guard because
+    # geocoding the bare word "Zakliczyn" could otherwise choose the wrong settlement.
+    if mode == 'radius_verified':
+        same_name_reject=_same_name_zakliczyn_guard(
+            record.get('location'),record.get('title'),record.get('description')
+        )
+        if same_name_reject:
+            return False,None,same_name_reject
+        max_d=float(area_cfg.get('fallback_radius_km', 0) or 0)
+        if distance_km is None:
+            return (not bool(area_cfg.get('reject_unknown_location',True))),None,'radius-unresolved'
+        if max_d <= 0:
+            return True,None,'radius-verified-no-limit'
+        return distance_km <= max_d,None,('radius-verified' if distance_km <= max_d else 'outside-radius')
+
     if mode != 'locality_whitelist':
         max_d=float(area_cfg.get('fallback_radius_km', 0) or 0)
         if max_d and distance_km is not None:

@@ -8,6 +8,7 @@ from .area import registry_names, registry_outside_names
 # One canonical registry is shared by parser + area validator.  This avoids the old
 # drift where config.py/parser.py/area.py each knew a slightly different village list.
 KNOWN_LOCALITIES = list(dict.fromkeys(registry_names() + registry_outside_names()))
+GENERIC_MUNICIPALITY_LOCALITIES = {'zakliczyn','gromnik','czchow'}
 
 LOCATION_PATTERNS = [
     r"(?:lokalizacja|położona|polozona|położony|polozony)(?:\s+jest)?(?:\s+w|\s*:)?\s+([A-ZŁŚŻŹĆŃÓĘĄ][\wąćęłńóśźżĄĆĘŁŃÓŚŹŻ -]{2,45})",
@@ -127,7 +128,7 @@ def _specific_locality(title: str, desc: str, structured_loc: str) -> tuple[str,
     """Choose the most specific locality with a confidence source label."""
     # Structured locality is good unless it is only the generic municipality.
     sl=asciifold(structured_loc)
-    if structured_loc and sl not in {"zakliczyn","gmina zakliczyn","tarnowski","powiat tarnowski","malopolskie"}:
+    if structured_loc and sl not in GENERIC_MUNICIPALITY_LOCALITIES | {"gmina zakliczyn","gmina gromnik","gmina czchow","tarnowski","powiat tarnowski","brzeski","powiat brzeski","malopolskie"}:
         return clean_text(structured_loc), "structured"
 
     # Title is strong: portals often title offers "Działka Słona" even when JSON-LD says Zakliczyn.
@@ -143,11 +144,13 @@ def _specific_locality(title: str, desc: str, structured_loc: str) -> tuple[str,
         if re.search(rf"(?<![a-z0-9]){re.escape(asciifold(name))}(?![a-z0-9])", df):
             hits.append(name)
     # Prefer a specific village over generic Zakliczyn when both occur.
-    specific=[h for h in hits if asciifold(h)!="zakliczyn"]
+    specific=[h for h in hits if asciifold(h) not in GENERIC_MUNICIPALITY_LOCALITIES]
     if len(set(specific))==1:
         return specific[0], "description"
-    if not specific and "Zakliczyn" in hits:
-        return "Zakliczyn", "description"
+    if not specific:
+        for municipality in ("Zakliczyn","Gromnik","Czchów"):
+            if municipality in hits:
+                return municipality, "description"
 
     if structured_loc:
         return clean_text(structured_loc), "structured-generic"
@@ -538,20 +541,23 @@ def refine_from_rendered_text(rec: dict, visible_text: str) -> dict:
         rec.get("price"),rec.get("area_m2"),explicit_ppm
     )
     loc_fold=asciifold(rec.get("location") or "")
-    if loc_fold in {"", "zakliczyn", "gmina zakliczyn", "powiat tarnowski", "tarnowski", "malopolskie"}:
+    if loc_fold in {"", "zakliczyn", "gmina zakliczyn", "gromnik", "gmina gromnik", "czchow", "gmina czchow", "powiat tarnowski", "tarnowski", "powiat brzeski", "brzeski", "malopolskie"}:
         ef=asciifold(early)
         hits=[]
         for name in KNOWN_LOCALITIES:
             nf=asciifold(name)
             if re.search(rf"(?<![a-z0-9]){re.escape(nf)}(?![a-z0-9])", ef):
                 hits.append(name)
-        specific=list(dict.fromkeys(x for x in hits if asciifold(x)!="zakliczyn"))
+        specific=list(dict.fromkeys(x for x in hits if asciifold(x) not in GENERIC_MUNICIPALITY_LOCALITIES))
         if len(specific)==1:
             rec["location"]=specific[0]
             rec["location_confidence"]="rendered-text"
-        elif not specific and "Zakliczyn" in hits:
-            rec["location"]="Zakliczyn"
-            rec["location_confidence"]="rendered-text-generic"
+        elif not specific:
+            for municipality in ("Zakliczyn","Gromnik","Czchów"):
+                if municipality in hits:
+                    rec["location"]=municipality
+                    rec["location_confidence"]="rendered-text-generic"
+                    break
 
     if not rec.get("phone"):
         rec["phone"]=phone_from_text(text)

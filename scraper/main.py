@@ -11,7 +11,7 @@ from app.scraper import Scraper
 from app.geocode import Geocoder
 from app.area import area_accepts
 from app.classify import classify_category, olx_url_cid, is_rental_offer
-from app.utils import haversine_km,fingerprint
+from app.utils import haversine_km,fingerprint,asciifold
 from app.dates import normalize_published
 from app.scoring import enrich_scores
 from app.telegram_notify import TelegramNotify,listing_message
@@ -19,8 +19,8 @@ from app.egib import EGIBResolver
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
-LISTING_PARSER_VERSION='1.5.1-sale-location-guard-v3'
-DB_MAINTENANCE_VERSION='1.5.1-sale-only-cleanup-v4'
+LISTING_PARSER_VERSION='1.5.2-radius-discovery-v1'
+DB_MAINTENANCE_VERSION='1.5.2-radius-cleanup-v1'
 KNOWN_BAD_URLS={
     'https://www.olx.pl/d/oferta/dzialka-budowlana-20km-od-krakowa-CID3-ID1c8sfW.html':'wrong-zakliczyn-myslenice',
     'https://www.olx.pl/d/oferta/powierzchnia-300m2-CID3-ID1c2K6x.html':'rental-wrong-zakliczyn',
@@ -113,9 +113,9 @@ async def run():
             for bad_url,bad_reason in KNOWN_BAD_URLS.items():
                 try: db.block_url(bad_url,bad_reason)
                 except Exception as e: print(f'[BOOT] blocklist seed warning {bad_url}: {e}',flush=True)
-            existing=db.query("SELECT canonical_url,source,title,location,description FROM listings")
+            existing=db.query("SELECT canonical_url,source,title,location,description,distance_km FROM listings")
             bad=[]; reasons={}
-            hard_prefixes=('explicit-outside','known-gmina-outside-target','conflicting-locality','unknown-locality-in-target-gmina')
+            hard_prefixes=('explicit-outside','known-gmina-outside-target','conflicting-locality','unknown-locality-in-target-gmina','outside-radius')
             for row in existing:
                 why=None
                 if row.get('canonical_url') in KNOWN_BAD_URLS:
@@ -123,7 +123,7 @@ async def run():
                 elif is_rental_offer(row.get('title') or '',row.get('description') or '','',row.get('canonical_url') or ''):
                     why='rental-offer'
                 if why is None:
-                    ok,_,area_why=area_accepts(row,area_cfg,None)
+                    ok,_,area_why=area_accepts(row,area_cfg,row.get('distance_km'))
                     if (not ok) and str(area_why or '').startswith(hard_prefixes):
                         why=area_why
                 if why:
@@ -197,56 +197,85 @@ async def run():
             if r.get('canonical_url') in blocked:
                 batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'reason':'blacklisted'}); continue
             jsonld=r.pop('_jsonld',[]); body=r.pop('_body','')
-            fold=body.lower().replace('ł','l')
+            fold=asciifold(body)
             if is_rental_offer(r.get('title') or '',r.get('description') or body,'',r.get('canonical_url') or ''):
                 batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'reason':'rental-offer'}); continue
             if 'gmina siepraw' in fold or 'powiat myslenicki' in fold:
                 batch_rejected.append({'url':r.get('canonical_url'),'reason':'wrong Zakliczyn (Siepraw/Myślenice)'}); continue
-            # OLX Zakliczyn is ambiguous. Trust OLX structured coordinates, never the
-            # geocoder that was explicitly biased toward our Zakliczyn in old builds.
+            area_mode=(area_cfg or {}).get('mode','locality_whitelist')
+            radius_mode=area_mode=='radius_verified'
+            scope_fold=asciifold(' '.join([str(r.get('title') or ''),str(r.get('location') or ''),str(r.get('description') or ''),body[:4000]]))
+            if 'zakliczyn' in scope_fold and any(x in scope_fold for x in ('powiat myslenick','gmina siepraw','kolo myslenic','okolice myslenic')):
+                batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'reason':'wrong Zakliczyn (Siepraw/Myślenice)'}); continue
+
+            # OLX Zakliczyn is ambiguous. Structured API coordinates are the strongest
+            # evidence and are reused by both legacy whitelist and radius modes.
+            olx_coords=None
             if r.get('source')=='OLX':
                 olx_lat=r.get('_olx_structured_lat');olx_lon=r.get('_olx_structured_lon')
                 if olx_lat is not None and olx_lon is not None:
-                    olx_d=haversine_km(cfg['center']['lat'],cfg['center']['lon'],float(olx_lat),float(olx_lon))
-                    r['lat']=float(olx_lat);r['lon']=float(olx_lon);r['distance_km']=olx_d
-                    if olx_d>max(12.0,float(cfg.get('center',{}).get('radius_km',10.0))):
+                    olx_coords=(float(olx_lat),float(olx_lon))
+                    olx_d=haversine_km(cfg['center']['lat'],cfg['center']['lon'],olx_coords[0],olx_coords[1])
+                    r['lat']=olx_coords[0];r['lon']=olx_coords[1];r['distance_km']=olx_d
+                    if not radius_mode and olx_d>max(12.0,float(cfg.get('center',{}).get('radius_km',10.0))):
                         batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':olx_d,'reason':'olx-structured-geo-outside-target'}); continue
-                elif (r.get('location') or '').strip().lower()=='zakliczyn':
-                    target_text=(str(r.get('title') or '')+' '+str(r.get('description') or '')+' '+body).lower().replace('ł','l')
+                elif asciifold((r.get('location') or '').strip())=='zakliczyn':
+                    target_text=asciifold(str(r.get('title') or '')+' '+str(r.get('description') or '')+' '+body)
                     if not any(x in target_text for x in ('powiat tarnowsk','gmina zakliczyn','nad dunajcem','tarnow')):
                         batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'reason':'olx-ambiguous-zakliczyn-no-geo'}); continue
-            # Resolve the target area from listing text FIRST. In whitelist mode we
-            # deliberately do not let an arbitrary JSON-LD coordinate rescue an unknown
-            # locality: portals can embed geo for recommended offers and that caused
-            # far-away listings to appear 2 km from Bieśnik.
-            text_ok,text_locality,text_confidence=area_accepts(r,area_cfg,None)
-            if not text_ok and text_confidence.startswith('explicit-outside'):
-                batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':None,'reason':text_confidence}); continue
 
-            coords=None
-            locality=text_locality
-            confidence=text_confidence
-            if locality:
-                if r.get('source')=='OLX' and r.get('_olx_structured_lat') is not None and r.get('_olx_structured_lon') is not None:
-                    coords=(float(r['_olx_structured_lat']),float(r['_olx_structured_lon']))
+            if radius_mode:
+                # v1.5.2: acceptance is no longer an arbitrary village whitelist. We
+                # discover broadly around Zakliczyn/Gromnik/Czchów, resolve the listing
+                # locality, and keep it only if it is <= configured radius from Bieśnik.
+                coords=olx_coords
+                coord_source='olx-api' if coords else None
+                if coords is None and (r.get('location') or '').strip():
+                    coords=geocoder.geocode(str(r.get('location')))
+                    if coords: coord_source='location-geocode'
+                if coords:
+                    r['lat'],r['lon']=coords
+                    r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],coords[0],coords[1])
                 else:
-                    query=locality+', gmina Zakliczyn, powiat tarnowski'
-                    coords=geocoder.geocode(query)
-            elif (area_cfg or {}).get('mode')!='locality_whitelist':
-                coords=geocoder.from_jsonld(jsonld)
-                if not coords and r.get('location'):
-                    coords=geocoder.geocode(r['location'])
-
-            if coords:
-                r['lat'],r['lon']=coords; r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],coords[0],coords[1])
-            else:
-                r['lat']=r['lon']=r['distance_km']=None
-
-            if not locality:
-                ok,locality,confidence=area_accepts(r,area_cfg,r.get('distance_km'))
+                    r['lat']=r['lon']=r['distance_km']=None
+                ok,_,confidence=area_accepts(r,area_cfg,r.get('distance_km'))
                 if not ok:
                     batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':r.get('distance_km'),'reason':confidence}); continue
-            r['area_locality']=locality or r.get('location') or None; r['area_confidence']=confidence
+                r['area_locality']=r.get('location') or None
+                r['area_confidence']=f"{confidence}:{coord_source or 'none'}"
+            else:
+                # Legacy locality-whitelist mode retained for backwards compatibility.
+                # Resolve the target area from listing text FIRST. In whitelist mode we
+                # deliberately do not let an arbitrary JSON-LD coordinate rescue an unknown
+                # locality: portals can embed geo for recommended offers.
+                text_ok,text_locality,text_confidence=area_accepts(r,area_cfg,None)
+                if not text_ok and text_confidence.startswith('explicit-outside'):
+                    batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':None,'reason':text_confidence}); continue
+
+                coords=None
+                locality=text_locality
+                confidence=text_confidence
+                if locality:
+                    if olx_coords:
+                        coords=olx_coords
+                    else:
+                        query=locality+', gmina Zakliczyn, powiat tarnowski'
+                        coords=geocoder.geocode(query)
+                elif (area_cfg or {}).get('mode')!='locality_whitelist':
+                    coords=geocoder.from_jsonld(jsonld)
+                    if not coords and r.get('location'):
+                        coords=geocoder.geocode(r['location'])
+
+                if coords:
+                    r['lat'],r['lon']=coords; r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],coords[0],coords[1])
+                else:
+                    r['lat']=r['lon']=r['distance_km']=None
+
+                if not locality:
+                    ok,locality,confidence=area_accepts(r,area_cfg,r.get('distance_km'))
+                    if not ok:
+                        batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':r.get('distance_km'),'reason':confidence}); continue
+                r['area_locality']=locality or r.get('location') or None; r['area_confidence']=confidence
 
             # If the advert exposes a parcel number, resolve it against the official
             # GUGiK EGiB WFS. This gives a stable cadastral id and a real parcel centroid.
@@ -262,6 +291,13 @@ async def run():
                             r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],r['lat'],r['lon'])
                 except Exception as e:
                     print(f"[EGIB] lookup warning {r.get('area_locality')} dz. {r.get('parcel_number')}: {type(e).__name__}: {e}",flush=True)
+            # Exact cadastral coordinates, when available, are stronger than a village
+            # centre. Re-apply the radius after EGiB so edge localities cannot rescue a
+            # parcel that is actually outside the 10 km target.
+            if radius_mode:
+                ok,_,radius_conf=area_accepts(r,area_cfg,r.get('distance_km'))
+                if not ok:
+                    batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':r.get('distance_km'),'reason':radius_conf+'-after-egib'}); continue
             r['published_at']=normalize_published(r.get('published_text'))
             r['updated_at']=normalize_published(r.get('updated_text'))
             r['fingerprint']=fingerprint(r.get('title',''),r.get('area_locality') or r.get('location',''),r.get('area_m2'),r.get('price'),r.get('parcel_number'))
@@ -447,7 +483,7 @@ async def run():
         location_reason_counts[reason]=location_reason_counts.get(reason,0)+1
     location_validation={
         'registry_version':'zakliczyn-teryt-2026-09',
-        'accepted_target_localities':list(area_cfg.get('primary_localities') or [])+list(area_cfg.get('nearby_localities') or []),
+        'area_mode':area_cfg.get('mode'),'radius_km':area_cfg.get('fallback_radius_km'),'discovery_localities':list(area_cfg.get('discovery_localities') or []),
         'rejected_total':len(rejected),
         'reasons':location_reason_counts,
     }

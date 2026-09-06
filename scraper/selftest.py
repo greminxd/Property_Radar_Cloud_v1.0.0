@@ -22,9 +22,22 @@ ok,_,why=area_accepts({'source':'TEST','title':'Działka Zakliczyn','location':'
 ok,_,why=area_accepts({'source':'OLX','title':'Działka budowlana 20km od Krakowa','location':'Zakliczyn, Małopolskie','description':'Sprzedam działkę położoną w Zakliczynie/ koło Myślenic ul. Cichy Kącik nr 369/7'},cfg,None);assert not ok and 'same-name' in why,why
 ok,loc,why=area_accepts({'source':'OLX','title':'Działka budowlana Zakliczyn','location':'Zakliczyn, Małopolskie','description':'Zakliczyn, powiat tarnowski. Działka na sprzedaż.'},cfg,None);assert ok and loc=='Zakliczyn',(ok,loc,why)
 
+
+# v1.5.2 production scope: broad discovery + strict 10 km distance verification.
+radius_cfg={'mode':'radius_verified','fallback_radius_km':10,'reject_unknown_location':True}
+ok,_,why=area_accepts({'source':'TEST','title':'Działka Borowa','location':'Borowa','description':'gmina Zakliczyn'},radius_cfg,3.14);assert ok and why=='radius-verified',(ok,why)
+ok,_,why=area_accepts({'source':'TEST','title':'Działka','location':'Siemiechów','description':'gmina Gromnik'},radius_cfg,7.53);assert ok and why=='radius-verified',(ok,why)
+ok,_,why=area_accepts({'source':'TEST','title':'Działka','location':'Gromnik','description':''},radius_cfg,12.1);assert not ok and why=='outside-radius',(ok,why)
+ok,_,why=area_accepts({'source':'TEST','title':'Działka','location':'','description':''},radius_cfg,None);assert not ok and why=='radius-unresolved',(ok,why)
+ok,_,why=area_accepts({'source':'TEST','title':'Działka Zakliczyn','location':'Zakliczyn','description':'Zakliczyn koło Myślenic, gmina Siepraw'},radius_cfg,2.0);assert not ok and 'same-name' in why,why
+
+html_gromnik='''<html><head><meta property="og:title" content="Działka budowlano-rolna 1,23 ha | 30,35 ar UM"><meta property="og:description" content="SIEMIECHÓW | GMINA GROMNIK | POWIAT TARNOWSKI. Powierzchnia działki 12 300 m². Cena 150 000 zł."><meta name="geo.placename" content="Gromnik"></head><body><main>SIEMIECHÓW | GMINA GROMNIK | POWIAT TARNOWSKI</main></body></html>'''
+rg=parse_detail(html_gromnik,'https://www.otodom.pl/pl/oferta/test-IDx','Otodom','plot')
+assert rg['location']=='Siemiechów',rg.get('location')
+
 f1=fingerprint('Działka Zdonia','Zdonia',1500,100000,'187/22');f2=fingerprint('Działka Zdonia','Zdonia',1500,90000,'187/22');assert f1==f2
 rows=[{'id':i,'canonical_url':f'https://x/{i}','category':'plot','plot_type':'budowlana','planning_status':'wydane WZ','area_m2':1500,'price_m2':p} for i,p in enumerate([40,45,50,55],1)]
 t={'id':99,'canonical_url':'https://x/t','category':'plot','plot_type':'budowlana','planning_status':'wydane WZ','area_m2':1500,'price_m2':35}
 conf={'scoring':{'minimum_comparables_for_deal_score':3,'deal_thresholds':{'mega':.65,'deal':.8,'good':.95,'market':1.1,'expensive':1.4}}}
 enrich_scores(t,rows,conf);assert t['median_comparable'] and t['comparable_count']>=3
-print('SELFTEST OK v1.5.1')
+print('SELFTEST OK v1.5.2')

@@ -49,8 +49,8 @@
     }
   },
   "area": {
-    "mode": "locality_whitelist",
-    "label": "Zdonia / Zakliczyn / Słona + bliskie okolice",
+    "mode": "radius_verified",
+    "label": "Bieśnik + 10 km (weryfikacja po odległości)",
     "primary_localities": [
       "Zdonia",
       "Zakliczyn",
@@ -64,7 +64,7 @@
       "Lusławice",
       "Wesołów"
     ],
-    "fallback_radius_km": 5.0,
+    "fallback_radius_km": 10.0,
     "reject_unknown_location": true,
     "known_gmina_localities": [
       "Bieśnik",
@@ -105,24 +105,59 @@
       "Czchów",
       "Domosławice"
     ],
-    "registry": "data/localities_zakliczyn.json"
+    "registry": "data/localities_zakliczyn.json",
+    "discovery_localities": [
+      "Bieśnik",
+      "Zdonia",
+      "Zakliczyn",
+      "Słona",
+      "Kończyska",
+      "Olszowa",
+      "Paleśnica",
+      "Lusławice",
+      "Wesołów",
+      "Borowa",
+      "Dzierżaniny",
+      "Faliszewice",
+      "Faściszowa",
+      "Gwoździec",
+      "Melsztyn",
+      "Roztoka",
+      "Ruda Kameralna",
+      "Stróże",
+      "Wola Stróska",
+      "Wróblowice",
+      "Zawada Lanckorońska",
+      "Charzewice",
+      "Filipowice",
+      "Siemiechów",
+      "Gromnik",
+      "Jastrzębia",
+      "Olszyny",
+      "Janowice",
+      "Złota",
+      "Czchów",
+      "Domosławice"
+    ]
   },
   "sources": [
     {
       "name": "Otodom",
       "enabled": true,
       "search_urls": [
-        "https://www.otodom.pl/pl/wyniki/sprzedaz/dzialka/malopolskie/tarnowski/zakliczyn"
+        "https://www.otodom.pl/pl/wyniki/sprzedaz/dzialka/malopolskie/tarnowski/zakliczyn",
+        "https://www.otodom.pl/pl/wyniki/sprzedaz/dzialka/malopolskie/tarnowski/gromnik",
+        "https://www.otodom.pl/pl/wyniki/sprzedaz/dzialka/malopolskie/brzeski/czchow"
       ],
       "detail_regex": "https?://(?:www\\.)?otodom\\.pl/pl/oferta/[^?#]+",
       "prefer_http_discovery": true,
       "prefer_http_details": true,
       "max_search_pages": 3,
-      "max_detail_pages": 80,
+      "max_detail_pages": 140,
       "parallel_details": 6,
       "detail_timeout_s": 18,
-      "detail_budget_s": 105,
-      "source_timeout_s": 140,
+      "detail_budget_s": 135,
+      "source_timeout_s": 180,
       "http_retries": 3,
       "browser_search_fallback": true
     },
@@ -137,21 +172,43 @@
       "prefer_http_discovery": true,
       "prefer_http_details": true,
       "max_search_pages": 1,
-      "max_detail_pages": 35,
+      "max_detail_pages": 80,
       "parallel_details": 5,
       "detail_timeout_s": 18,
       "detail_budget_s": 105,
-      "source_timeout_s": 210,
+      "source_timeout_s": 240,
       "api_queries": [
+        "Bieśnik",
         "Zdonia",
         "Zakliczyn",
         "Słona",
-        "Bieśnik",
         "Kończyska",
         "Olszowa",
         "Paleśnica",
         "Lusławice",
-        "Wesołów"
+        "Wesołów",
+        "Borowa",
+        "Dzierżaniny",
+        "Faliszewice",
+        "Faściszowa",
+        "Gwoździec",
+        "Melsztyn",
+        "Roztoka",
+        "Ruda Kameralna",
+        "Stróże",
+        "Wola Stróska",
+        "Wróblowice",
+        "Zawada Lanckorońska",
+        "Charzewice",
+        "Filipowice",
+        "Siemiechów",
+        "Gromnik",
+        "Jastrzębia",
+        "Olszyny",
+        "Janowice",
+        "Złota",
+        "Czchów",
+        "Domosławice"
       ],
       "api_limit": 50,
       "api_pages": 1,
@@ -159,9 +216,9 @@
       "http_retries": 3,
       "html_supplement": true,
       "html_search_pages": 1,
-      "fallback_detail_pages": 20,
+      "fallback_detail_pages": 35,
       "browser_session_fallback": true,
-      "browser_fallback_detail_pages": 15,
+      "browser_fallback_detail_pages": 30,
       "query_from_area_registry": true,
       "api_category_id": 3,
       "sale_only": true
@@ -170,7 +227,9 @@
       "name": "Morizon",
       "enabled": true,
       "search_urls": [
-        "https://www.morizon.pl/dzialki/tarnowski/zakliczyn/"
+        "https://www.morizon.pl/dzialki/tarnowski/zakliczyn/",
+        "https://www.morizon.pl/dzialki/tarnowski/gromnik/",
+        "https://www.morizon.pl/dzialki/brzeski/czchow/"
       ],
       "detail_regex": "https?://(?:www\\.)?morizon\\.pl/oferta/[^?#]+",
       "prefer_http_discovery": true,
@@ -180,7 +239,9 @@
       "name": "Gratka",
       "enabled": true,
       "search_urls": [
-        "https://gratka.pl/nieruchomosci/dzialki-grunty/gmina-zakliczyn"
+        "https://gratka.pl/nieruchomosci/dzialki-grunty/gmina-zakliczyn",
+        "https://gratka.pl/nieruchomosci/dzialki-grunty/gmina-gromnik",
+        "https://gratka.pl/nieruchomosci/dzialki-grunty/gmina-czchow"
       ],
       "detail_regex": "https?://(?:www\\.)?gratka\\.pl/nieruchomosci/[^?#]+/ob/\\d+",
       "prefer_http_discovery": true,
@@ -190,7 +251,9 @@
       "name": "Nieruchomosci-online",
       "enabled": true,
       "search_urls": [
-        "https://zakliczyn.nieruchomosci-online.pl/dzialki,sprzedaz/"
+        "https://zakliczyn.nieruchomosci-online.pl/dzialki,sprzedaz/",
+        "https://gromnik.nieruchomosci-online.pl/dzialki,sprzedaz/",
+        "https://czchow.nieruchomosci-online.pl/dzialki,sprzedaz/"
       ],
       "detail_regex": "https?://[^/]*nieruchomosci-online\\.pl/[^?#]*\\d+\\.html",
       "prefer_http_discovery": true,
@@ -200,7 +263,9 @@
       "name": "Adresowo",
       "enabled": true,
       "search_urls": [
-        "https://adresowo.pl/dzialki/gmina-zakliczyn/"
+        "https://adresowo.pl/dzialki/gmina-zakliczyn/",
+        "https://adresowo.pl/dzialki/gmina-gromnik/",
+        "https://adresowo.pl/dzialki/gmina-czchow/"
       ],
       "detail_regex": "https?://(?:www\\.)?adresowo\\.pl/o/[^?#]+",
       "prefer_http_discovery": true,
@@ -214,7 +279,9 @@
       "name": "Domiporta",
       "enabled": true,
       "search_urls": [
-        "https://www.domiporta.pl/dzialka/sprzedam/malopolskie/zakliczyn"
+        "https://www.domiporta.pl/dzialka/sprzedam/malopolskie/zakliczyn",
+        "https://www.domiporta.pl/dzialka/sprzedam/malopolskie/gromnik",
+        "https://www.domiporta.pl/dzialka/sprzedam/malopolskie/czchow"
       ],
       "detail_regex": "https?://(?:www\\.)?domiporta\\.pl/nieruchomosci/[^?#]+"
     },
@@ -229,7 +296,11 @@
         "https://sprzedajemy.pl/palesnica/nieruchomosci/grunty-i-dzialki/sprzedaz",
         "https://sprzedajemy.pl/olszowa/nieruchomosci/grunty-i-dzialki/sprzedaz",
         "https://sprzedajemy.pl/luslawice/nieruchomosci/grunty-i-dzialki/sprzedaz",
-        "https://sprzedajemy.pl/wesolow/nieruchomosci/grunty-i-dzialki/sprzedaz"
+        "https://sprzedajemy.pl/wesolow/nieruchomosci/grunty-i-dzialki/sprzedaz",
+        "https://sprzedajemy.pl/borowa/nieruchomosci/grunty-i-dzialki/sprzedaz",
+        "https://sprzedajemy.pl/siemiechow/nieruchomosci/grunty-i-dzialki/sprzedaz",
+        "https://sprzedajemy.pl/gromnik/nieruchomosci/grunty-i-dzialki/sprzedaz",
+        "https://sprzedajemy.pl/czchow/nieruchomosci/grunty-i-dzialki/sprzedaz"
       ],
       "detail_regex": "https?://(?:www\\.)?sprzedajemy\\.pl/[^?#]*-nr\\d+",
       "prefer_http_discovery": true,
@@ -240,7 +311,10 @@
       "enabled": true,
       "search_urls": [
         "https://zakliczyn.lento.pl/nieruchomosci/dzialki-i-grunty.html",
-        "https://zakliczyn.lento.pl/nieruchomosci-w-okolicy/dzialki-i-grunty.html"
+        "https://zakliczyn.lento.pl/nieruchomosci-w-okolicy/dzialki-i-grunty.html",
+        "https://gromnik.lento.pl/nieruchomosci/dzialki-i-grunty.html",
+        "https://siemiechow-grom.lento.pl/nieruchomosci/dzialki-i-grunty.html",
+        "https://czchow.lento.pl/nieruchomosci/dzialki-i-grunty.html"
       ],
       "detail_regex": "https?://[^/]+\\.lento\\.pl/[^?#]+(?:,|%2C)\\d+\\.html"
     },
@@ -248,7 +322,9 @@
       "name": "Oferty.net",
       "enabled": true,
       "search_urls": [
-        "https://www.oferty.net/dzialki,zakliczyn"
+        "https://www.oferty.net/dzialki,zakliczyn",
+        "https://www.oferty.net/dzialki,gromnik",
+        "https://www.oferty.net/dzialki,czchow"
       ],
       "detail_regex": "https?://(?:m\\.|www\\.)?oferty\\.net/dzialka-na-sprzedaz-[^?#]+"
     },
@@ -256,7 +332,9 @@
       "name": "Tabelaofert",
       "enabled": true,
       "search_urls": [
-        "https://tabelaofert.pl/sprzedaz/dzialki/zakliczyn"
+        "https://tabelaofert.pl/sprzedaz/dzialki/zakliczyn",
+        "https://tabelaofert.pl/sprzedaz/dzialki/gromnik",
+        "https://tabelaofert.pl/sprzedaz/dzialki/czchow"
       ],
       "detail_regex": "https?://(?:www\\.)?tabelaofert\\.pl/oferta/[^?#,]+(?:,|%2C)\\d+",
       "prefer_http_discovery": true,

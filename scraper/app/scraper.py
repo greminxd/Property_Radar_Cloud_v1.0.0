@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_mod
 import json
 import re
 import time
@@ -8,7 +9,7 @@ from typing import Iterable
 
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urldefrag
+from urllib.parse import urljoin, urldefrag, urlencode, urlsplit
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from .utils import canonical_url, clean_text, phone_candidates
@@ -369,6 +370,366 @@ class Scraper:
             diag["errors"]=len(errors)
         return results,errors,diag
 
+    # ------------------------------------------------------------------ OLX
+    @staticmethod
+    def _olx_api_query_from_search_url(url: str) -> str | None:
+        """Best-effort query extraction from an ordinary OLX search URL.
+
+        Examples:
+          /nieruchomosci/dzialki/sprzedaz/q-zakliczyn/ -> zakliczyn
+          /nieruchomosci/dzialki/zakliczyn/           -> zakliczyn
+
+        Explicit ``api_queries`` in config always win; this helper only keeps the
+        collector useful if a search URL is edited later.
+        """
+        try:
+            path=[x for x in urlsplit(url).path.split('/') if x]
+        except Exception:
+            return None
+        for part in reversed(path):
+            low=part.lower()
+            if low.startswith('q-') and len(part)>2:
+                return part[2:].replace('-', ' ').strip()
+        generic={
+            'nieruchomosci','dzialki','dzialka','sprzedaz','wynajem','oferty',
+            'pl','d','oferta','ogloszenia','wszystkie','polska'
+        }
+        for part in reversed(path):
+            low=part.lower().strip()
+            if low not in generic and not low.startswith('page') and len(low)>=3:
+                return part.replace('-', ' ').strip()
+        return None
+
+    @staticmethod
+    def _olx_value_text(value) -> str:
+        if value is None:
+            return ''
+        if isinstance(value,(str,int,float)):
+            return clean_text(str(value))
+        if isinstance(value,list):
+            return clean_text(' '.join(Scraper._olx_value_text(x) for x in value))
+        if isinstance(value,dict):
+            # OLX params commonly use {key, label}. Prefer the human-readable
+            # label instead of concatenating it with the machine key (e.g.
+            # "3 600 m² 3600"), because that can confuse numeric parsers.
+            for k in ('label','value','name','key'):
+                v=value.get(k)
+                if v not in (None,'',[],{}):
+                    t=Scraper._olx_value_text(v)
+                    if t: return t
+            return ''
+        return clean_text(str(value))
+
+    @classmethod
+    def _olx_params_lines(cls, offer: dict) -> list[str]:
+        lines=[]
+        for p in offer.get('params') or []:
+            if not isinstance(p,dict):
+                continue
+            key=clean_text(str(p.get('key') or ''))
+            name=clean_text(str(p.get('name') or key or ''))
+            val=cls._olx_value_text(p.get('value'))
+            if not val:
+                # Some snapshots expose label directly on the parameter object.
+                val=cls._olx_value_text(p.get('label') or p.get('key'))
+            fold=(name+' '+key).lower().replace('ł','l')
+            if key=='m' or 'powierzch' in fold or 'area' in fold:
+                label='Powierzchnia działki'
+            elif 'price' in fold and ('m2' in fold or 'm²' in fold):
+                label='Cena za m²'
+            else:
+                label=name or key
+            line=clean_text((label+': '+val) if label and val else (label or val))
+            if line and line not in lines:
+                lines.append(line)
+        return lines
+
+    @classmethod
+    def _olx_offer_is_plot(cls, offer: dict) -> bool:
+        """Reject non-land results before the global ``plot`` category hint is used."""
+        title=clean_text(str(offer.get('title') or ''))
+        desc=clean_text(BeautifulSoup(str(offer.get('description') or ''),'lxml').get_text(' ',strip=True))
+        params=' '.join(cls._olx_params_lines(offer))
+        text=clean_text(title+' '+desc+' '+params)
+        # No category hint here on purpose: a query such as "Zakliczyn" can return
+        # cars, houses and services too.
+        return classify_category(title,str(offer.get('url') or ''),text,category_hint=None)=='plot'
+
+    @classmethod
+    def _olx_record_from_api(cls, offer: dict) -> dict | None:
+        """Turn one public /api/v1/offers item into the normal Property Radar record.
+
+        OLX search JSON already contains the full description, price, location,
+        timestamps, photos and category attributes.  Feeding a compact synthetic
+        listing document through ``parse_detail`` lets us reuse the battle-tested
+        area/ppm/planning/parcel parser without opening a browser tab per advert.
+        """
+        if not isinstance(offer,dict) or not cls._olx_offer_is_plot(offer):
+            return None
+        url=canonical_url(str(offer.get('url') or ''),str(offer.get('url') or ''))
+        if not url:
+            return None
+        title=clean_text(str(offer.get('title') or ''))
+        raw_desc=str(offer.get('description') or '')
+        desc=clean_text(BeautifulSoup(raw_desc,'lxml').get_text(' ',strip=True))
+        location=offer.get('location') or {}
+        city=''
+        region=''
+        if isinstance(location,dict):
+            c=location.get('city') or {}
+            r=location.get('region') or {}
+            if isinstance(c,dict): city=clean_text(str(c.get('name') or ''))
+            if isinstance(r,dict): region=clean_text(str(r.get('name') or ''))
+        city=city or clean_text(str(offer.get('city') or ''))
+        region=region or clean_text(str(offer.get('region') or ''))
+        price_obj=offer.get('price') or offer.get('price_label') or {}
+        price_value=None
+        price_label=''
+        if isinstance(price_obj,dict):
+            try:
+                v=price_obj.get('value')
+                if v is not None: price_value=float(v)
+            except Exception:
+                price_value=None
+            price_label=clean_text(str(price_obj.get('label') or ''))
+        elif isinstance(price_obj,(int,float)):
+            price_value=float(price_obj)
+        params_lines=cls._olx_params_lines(offer)
+        created=clean_text(str(offer.get('created_time') or ''))
+        refreshed=clean_text(str(offer.get('last_refresh_time') or offer.get('pushup_time') or ''))
+        photo=''
+        photos=offer.get('photos') or []
+        if isinstance(photos,list) and photos:
+            first=photos[0]
+            if isinstance(first,dict): first=first.get('link') or first.get('url') or first.get('photo')
+            if isinstance(first,str):
+                photo=first.replace('{width}','1200').replace('{height}','900')
+        # JSON-LD supplies the most reliable locality/price/date fields to parse_detail.
+        jsonld={
+            '@context':'https://schema.org', '@type':'Offer', 'name':title,
+            'description':desc, 'datePublished':created or None,
+            'dateModified':refreshed or None,
+            'address':{'@type':'PostalAddress','addressLocality':city,'addressRegion':region},
+        }
+        if price_value is not None and price_value>0:
+            jsonld['offers']={'@type':'Offer','price':price_value,'priceCurrency':'PLN'}
+        main_lines=[title]
+        if price_label: main_lines.append('Cena: '+price_label)
+        elif price_value is not None and price_value>0: main_lines.append(f'Cena: {price_value:g} zł')
+        if city: main_lines.append('Lokalizacja: '+city)
+        if region: main_lines.append('Region: '+region)
+        main_lines.extend(params_lines)
+        if created: main_lines.append('Dodane: '+created)
+        if refreshed: main_lines.append('Odświeżono: '+refreshed)
+        if desc: main_lines.append('Opis: '+desc)
+        meta_price=(f'<meta property="product:price:amount" content="{price_value:g}">' if price_value and price_value>0 else '')
+        meta_image=(f'<meta property="og:image" content="{html_mod.escape(photo,quote=True)}">' if photo else '')
+        html=(
+            '<html><head>'
+            f'<meta property="og:title" content="{html_mod.escape(title,quote=True)}">'
+            f'<meta property="og:description" content="{html_mod.escape(desc,quote=True)}">'
+            +meta_price+meta_image+
+            '<script type="application/ld+json">'+json.dumps(jsonld,ensure_ascii=False)+'</script>'
+            '<script type="application/json">'+json.dumps(offer,ensure_ascii=False)+'</script>'
+            '</head><body><main><h1>'+html_mod.escape(title)+'</h1><div>'+
+            html_mod.escape('\n'.join(main_lines)).replace('\n','<br>')+
+            '</div></main></body></html>'
+        )
+        rec=parse_detail(html,url,'OLX',category_hint='plot')
+        rec['category']=classify_category(rec.get('title') or '',url,rec.get('_body') or '',category_hint='plot')
+        if photo and not rec.get('image_url'): rec['image_url']=photo
+        status=clean_text(str(offer.get('status') or '')).lower()
+        if status and status not in {'active','new'}:
+            rec['source_status']='archived'
+            rec['archive_reason']='OLX API status: '+status
+        return rec
+
+    def _http_json_get_sync(self, url: str):
+        timeout_s=float(self.cfg['browser'].get('http_timeout_s',12))
+        try:
+            r=self._http.get(
+                url, timeout=(5,timeout_s), allow_redirects=True,
+                headers={'Accept':'application/json','Referer':'https://www.olx.pl/'},
+            )
+            text=r.text or ''
+            data=None
+            if r.status_code==200:
+                try: data=r.json()
+                except Exception:
+                    try: data=json.loads(text)
+                    except Exception: data=None
+            return r.status_code,r.url,data,text
+        except Exception as e:
+            return 0,url,None,f'__HTTP_ERROR__ {type(e).__name__}: {e}'
+
+    async def _http_json_get_retry(self, url: str, attempts: int=3, delays=(0.0,1.5,4.0)):
+        history=[];last=(0,url,None,'')
+        attempts=max(1,int(attempts))
+        for i in range(attempts):
+            if i:
+                delay=delays[min(i,len(delays)-1)] if delays else 0
+                if delay: await asyncio.sleep(float(delay))
+            last=await asyncio.to_thread(self._http_json_get_sync,url)
+            status=last[0];history.append(status)
+            if status==200: break
+            if status not in {0,403,408,425,429,500,502,503,504}: break
+        return (*last,history)
+
+    async def _collect_olx(self, browser, source):
+        """Dedicated OLX collector: public JSON API first, HTML only as a bounded fallback.
+
+        The public search endpoint is the same one used by OLX's web application and
+        contemporary monitors.  It gives us full descriptions and structured params,
+        so the normal path opens zero Playwright detail tabs.  This is intentionally
+        different from the old generic collector that could burn the whole source
+        budget on GitHub runners when ordinary OLX pages returned 403/challenges.
+        """
+        del browser  # OLX v1 collector intentionally never launches Playwright.
+        pattern=re.compile(source['detail_regex'],re.I)
+        errors=[];results=[];seen_urls=set();failed=[]
+        api_statuses=[];api_attempt_statuses=[];api_items=0;api_plot_items=0
+        api_pages_ok=0;api_parse_failures=0;api_records_ok=0;api_fail_fast=None
+        html_statuses=[];html_links=[];fallback_detail_statuses=[]
+        attempts=max(1,int(source.get('http_retries',3)))
+        limit=max(1,min(50,int(source.get('api_limit',50))))
+        api_pages=max(1,int(source.get('api_pages',2)))
+
+        queries=[]
+        for q in source.get('api_queries') or []:
+            q=clean_text(str(q))
+            if q: queries.append(q)
+        if not queries:
+            for u in source.get('search_urls',[]):
+                q=self._olx_api_query_from_search_url(u)
+                if q: queries.append(q)
+        queries=list(dict.fromkeys(queries)) or ['zakliczyn']
+
+        stop_api=False
+        consecutive_transport_failures=0
+        for query in queries:
+            if stop_api: break
+            for page_no in range(api_pages):
+                params=[('limit',str(limit)),('offset',str(page_no*limit)),('query',query)]
+                # Sorting is best-effort; OLX has historically changed how strictly it
+                # honors created_at ordering, but it never affects correctness here.
+                if source.get('api_sort_by','created_at:desc'):
+                    params.append(('sort_by',str(source.get('api_sort_by','created_at:desc'))))
+                if source.get('api_category_id') is not None:
+                    params.append(('category_id',str(source['api_category_id'])))
+                if source.get('api_city_id') is not None:
+                    params.append(('city_id',str(source['api_city_id'])))
+                if source.get('api_region_id') is not None:
+                    params.append(('region_id',str(source['api_region_id'])))
+                for k,v in (source.get('api_filters') or {}).items():
+                    if isinstance(v,list):
+                        for x in v: params.append((str(k),str(x)))
+                    elif v is not None: params.append((str(k),str(v)))
+                api_url='https://www.olx.pl/api/v1/offers/?'+urlencode(params,doseq=True)
+                status,final_url,payload,text,hist=await self._http_json_get_retry(api_url,attempts=attempts)
+                api_statuses.append(status);api_attempt_statuses.extend(hist)
+                if status!=200 or not isinstance(payload,dict):
+                    if len(failed)<4:
+                        failed.append({'url':api_url,'status':status,'reason':'api search failed','text':text[:160]})
+                    if page_no==0:
+                        errors.append(f'OLX API query={query!r}: HTTP {status or "transport"}')
+                    # A completed retry sequence ending in 403/429 is almost always
+                    # endpoint/IP-wide rather than query-specific. Do not repeat the
+                    # same doomed request for every locality and burn the 150 s source
+                    # budget. Transport failures get one extra locality as a sanity check.
+                    if status in {403,429}:
+                        api_fail_fast=f'HTTP {status} after retries'; stop_api=True
+                    elif status==0:
+                        consecutive_transport_failures += 1
+                        if consecutive_transport_failures>=2:
+                            api_fail_fast='2 consecutive transport failures'; stop_api=True
+                    break
+                consecutive_transport_failures=0
+                data=payload.get('data') or []
+                if isinstance(data,dict):
+                    # Be tolerant if OLX ever wraps the list (some mirrors normalize it).
+                    data=data.get('offers') or data.get('items') or []
+                if not isinstance(data,list): data=[]
+                api_pages_ok += 1;api_items += len(data)
+                for offer in data:
+                    if not isinstance(offer,dict): continue
+                    url=canonical_url(str(offer.get('url') or ''),str(offer.get('url') or ''))
+                    if not url or not pattern.match(url) or url in seen_urls: continue
+                    if not self._olx_offer_is_plot(offer): continue
+                    api_plot_items += 1
+                    try:
+                        rec=self._olx_record_from_api(offer)
+                    except Exception as e:
+                        api_parse_failures += 1
+                        if len(failed)<4: failed.append({'url':url,'status':200,'reason':f'api parse {type(e).__name__}: {e}'})
+                        continue
+                    if rec and rec.get('category') in self.cfg['filters']['categories']:
+                        seen_urls.add(url);results.append(rec);api_records_ok += 1
+                if len(data)<limit: break
+
+        # Optional supplement: ordinary category/location page can expose nearby offers
+        # that do not literally contain the query word.  It is HTTP-only and tightly
+        # bounded; a 403 here no longer causes Playwright timeouts or kills API results.
+        if source.get('html_supplement',True):
+            for search_url in source.get('search_urls',[]):
+                links,statuses=await self._discover_http(search_url,pattern,int(source.get('html_search_pages',1)),'OLX')
+                html_statuses.extend(statuses)
+                html_links.extend(x for x in links if x not in seen_urls)
+        html_links=list(dict.fromkeys(html_links))[:int(source.get('fallback_detail_pages',20))]
+
+        sem=asyncio.Semaphore(max(1,int(source.get('parallel_details',5))))
+        detail_timeout=float(source.get('detail_timeout_s',18))
+        async def fallback_detail(u):
+            async with sem:
+                status,final_url,html,hist=await self._http_get_retry(u,attempts=min(attempts,2))
+                fallback_detail_statuses.append(status)
+                if status!=200 or len(html)<500: return
+                rec=parse_detail(html,final_url or u,'OLX',category_hint='plot')
+                body=rec.get('_body') or ''
+                rec['category']=classify_category(rec.get('title') or '',final_url or u,body,category_hint=None)
+                if body: rec=refine_from_rendered_text(rec,body)
+                ok,blocked=self._listing_like(rec,body)
+                if ok and not blocked and rec.get('category') in self.cfg['filters']['categories']:
+                    seen_urls.add(rec.get('canonical_url') or u);results.append(rec)
+                elif len(failed)<4:
+                    failed.append({'url':u,'status':status,'reason':'html fallback not listing-like','title':(rec.get('title') or '')[:120]})
+
+        if html_links:
+            tasks=[]
+            for u in html_links:
+                async def bounded(x=u):
+                    try: await asyncio.wait_for(fallback_detail(x),timeout=detail_timeout)
+                    except asyncio.TimeoutError: errors.append(f'{x}: OLX HTTP fallback detail timeout after {detail_timeout:.0f}s')
+                    except Exception as e: errors.append(f'{x}: OLX HTTP fallback detail {type(e).__name__}: {e}')
+                tasks.append(asyncio.create_task(bounded()))
+            await asyncio.gather(*tasks,return_exceptions=True)
+
+        # De-dupe because an offer may appear in both API query and nearby HTML supplement.
+        unique={}
+        for rec in results:
+            if rec and rec.get('canonical_url'): unique[rec['canonical_url']]=rec
+        results=list(unique.values())
+        healthy=bool(results and (api_pages_ok or any(x==200 for x in html_statuses)))
+        diag={
+            'source':'OLX','search_pages_ok':api_pages_ok + sum(1 for x in html_statuses if x==200),
+            'discovered_links':len(seen_urls)+len(html_links),'detail_pages_ok':len(results),
+            'detail_pages_fetched':len(results),'listing_like':len(results),'records':len(results),
+            'errors':len(errors),'blocked':sum(1 for x in api_statuses+html_statuses+fallback_detail_statuses if x==403),
+            'failed_samples':failed,'healthy':healthy,
+            'discovery_methods':(['olx-api-v1'] if api_pages_ok else []) + (['html-supplement'] if html_links else []),
+            'detail_methods':{'api-records':api_records_ok,'http-fallback':max(0,len(results)-api_records_ok)},
+            'http_statuses':html_statuses[-12:],'api_statuses':api_statuses[-12:],
+            'api_attempt_statuses':api_attempt_statuses[-24:],'fallback_detail_statuses':fallback_detail_statuses[-12:],
+            'api_pages_ok':api_pages_ok,'api_items':api_items,'api_plot_items':api_plot_items,
+            'api_parse_failures':api_parse_failures,'api_records_ok':api_records_ok,'api_queries':queries,
+            'api_fail_fast':api_fail_fast,
+            'html_supplement_links':len(html_links),'collector':'olx-public-api-v1',
+            'detail_timeouts_or_cancelled':sum(1 for e in errors if 'timeout' in e.lower()),
+        }
+        if not results:
+            errors.append('OLX: brak rekordów z publicznego /api/v1/offers i fallbacku HTML')
+            diag['errors']=len(errors)
+        return results,errors,diag
+
     @staticmethod
     def _navigation_url(base_url: str, href: str) -> str:
         """URL for pagination/navigation: preserve query string, drop only fragment."""
@@ -471,6 +832,8 @@ class Scraper:
         """Return (records, errors, diagnostics) with portal-specific collectors where needed."""
         if source.get("name")=="Otodom":
             return await self._collect_otodom(browser,source)
+        if source.get("name")=="OLX":
+            return await self._collect_olx(browser,source)
 
         context = await browser.new_context(
             locale="pl-PL",

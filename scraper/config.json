@@ -136,7 +136,25 @@
       "parallel_details": 5,
       "detail_timeout_s": 18,
       "detail_budget_s": 105,
-      "source_timeout_s": 150
+      "source_timeout_s": 150,
+      "api_queries": [
+        "Zdonia",
+        "Zakliczyn",
+        "Słona",
+        "Bieśnik",
+        "Kończyska",
+        "Olszowa",
+        "Paleśnica",
+        "Lusławice",
+        "Wesołów"
+      ],
+      "api_limit": 50,
+      "api_pages": 1,
+      "api_sort_by": "created_at:desc",
+      "http_retries": 3,
+      "html_supplement": true,
+      "html_search_pages": 1,
+      "fallback_detail_pages": 20
     },
     {
       "name": "Morizon",

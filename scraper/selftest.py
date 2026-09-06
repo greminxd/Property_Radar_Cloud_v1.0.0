@@ -182,3 +182,36 @@ assert Scraper._otodom_search_items(Scraper._next_data(_html))==_items
 assert 'page=3' in Scraper._page_url('https://www.otodom.pl/pl/wyniki/sprzedaz/dzialka/x?limit=72',3)
 
 print("SELFTEST OK v1.3.1 Otodom NextData")
+
+
+# v1.3.3: dedicated OLX collector consumes /api/v1/offers JSON directly.
+_olx_offer={
+    "id":859896227,
+    "url":"https://www.olx.pl/d/oferta/dzialka-luslawice-36-ar-CID3-IDVc2hZ.html",
+    "title":"Działka Lusławice 36 ar z WZ",
+    "description":"Działka nr 142/1 w Lusławicach. Wydane warunki zabudowy.",
+    "created_time":"2026-08-28T12:00:00+02:00",
+    "last_refresh_time":"2026-09-05T12:00:00+02:00",
+    "status":"active",
+    "price":{"value":350000,"label":"350 000 zł","currency":"PLN"},
+    "params":[
+        {"key":"m","name":"Powierzchnia","value":{"key":"3600","label":"3 600 m²"}},
+        {"key":"type","name":"Rodzaj","value":{"key":"rolno-budowlana","label":"Działki rolno-budowlane"}},
+    ],
+    "location":{"city":{"id":1,"name":"Zakliczyn"},"region":{"id":2,"name":"Małopolskie"}},
+    "photos":[{"link":"https://example.com/{width}x{height}.jpg"}],
+}
+assert Scraper._olx_offer_is_plot(_olx_offer), _olx_offer
+_olx_rec=Scraper._olx_record_from_api(_olx_offer)
+assert _olx_rec and _olx_rec['category']=='plot',_olx_rec
+assert _olx_rec['price']==350000,_olx_rec
+assert _olx_rec['area_m2']==3600,_olx_rec
+assert abs(_olx_rec['price_m2']-(350000/3600))<0.02,_olx_rec
+assert _olx_rec['location']=='Lusławice',_olx_rec
+assert _olx_rec['parcel_number']=='142/1',_olx_rec
+assert '1200x900' in (_olx_rec.get('image_url') or ''),_olx_rec
+assert Scraper._olx_api_query_from_search_url('https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zakliczyn/')=='zakliczyn'
+assert Scraper._olx_api_query_from_search_url('https://www.olx.pl/nieruchomosci/dzialki/zakliczyn/')=='zakliczyn'
+_nonplot=dict(_olx_offer,url='https://www.olx.pl/d/oferta/volkswagen-golf-zakliczyn-CID5-IDcar123.html',title='Volkswagen Golf Zakliczyn',description='Samochód osobowy, benzyna, 2018',params=[])
+assert not Scraper._olx_offer_is_plot(_nonplot),_nonplot
+print('SELFTEST OK v1.3.3 OLX public API')

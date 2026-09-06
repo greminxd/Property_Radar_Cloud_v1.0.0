@@ -38,4 +38,17 @@ def normalize_published(text:str|None, now:datetime|None=None)->str|None:
         if mon:
             try:return datetime(int(m.group(3)),mon,int(m.group(1)),hh,mm,tzinfo=ZoneInfo('Europe/Warsaw')).astimezone(ZoneInfo('UTC')).isoformat()
             except:pass
+    # Portals such as Sprzedajemy often show current-year publication as
+    # "03 Maj 07:27" without a year. Infer the year conservatively: if the
+    # resulting date would be more than one day in the future, it belongs to
+    # the previous year.
+    m=re.search(r'\b(\d{1,2})\s+([a-z]+)(?:\s+o)?(?:\s+\d{1,2}:\d{2})?\b',f)
+    if m:
+        mon=MONTHS.get(m.group(2))
+        if mon:
+            try:
+                d=datetime(now.year,mon,int(m.group(1)),hh,mm,tzinfo=ZoneInfo('Europe/Warsaw'))
+                if d > now + timedelta(days=1): d=d.replace(year=d.year-1)
+                return d.astimezone(ZoneInfo('UTC')).isoformat()
+            except:pass
     return None

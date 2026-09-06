@@ -52,6 +52,18 @@ class CloudDB:
         rows=self.query('SELECT COUNT(*) c FROM listings')
         return int(rows[0]['c']) if rows else 0
 
+
+    def purge_invalid_sprzedajemy(self):
+        """Delete legacy parser artifacts that are category/search pages, not offers."""
+        rows=self.query("SELECT id FROM listings WHERE source='Sprzedajemy' AND canonical_url NOT GLOB '*-nr[0-9]*'")
+        ids=[int(r['id']) for r in rows if r.get('id') is not None]
+        if not ids:return 0
+        for i in range(0,len(ids),50):
+            chunk=ids[i:i+50]; qs=','.join('?' for _ in chunk)
+            self.execute(f'DELETE FROM price_history WHERE listing_id IN ({qs})',chunk)
+            self.execute(f'DELETE FROM listings WHERE id IN ({qs})',chunk)
+        return len(ids)
+
     def count_scans_between(self,start_iso,end_iso):
         rows=self.query('SELECT COUNT(*) c FROM scan_runs WHERE finished_at>=? AND finished_at<?',[start_iso,end_iso])
         return int(rows[0]['c']) if rows else 0
@@ -88,6 +100,9 @@ class CloudDB:
             changes.append((rec,is_new,price_changed,old_price,reference_price))
         self.batch(stmts)
         return changes
+
+    def reset_price_alert_reference(self,url,new_price):
+        self.execute('UPDATE listings SET price_alert_reference=? WHERE canonical_url=?',[new_price,url])
 
     def mark_meaningful_price_change(self,url,old_price,new_price,at=None):
         at=at or self.now()

@@ -79,6 +79,7 @@ tg('setMyCommands',{'commands':[
     {'command':'status','description':'Krótki status bota'},
     {'command':'statuspelny','description':'Pełny status bota i źródeł'},
     {'command':'baza','description':'Status i statystyki bazy'},
+    {'command':'skanuj','description':'Uruchom skan teraz (admin)'},
     {'command':'id','description':'Pokaż Telegram user_id'},
     {'command':'diag','description':'Diagnostyka (admin)'},
 ]})

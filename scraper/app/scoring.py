@@ -27,13 +27,23 @@ def comparable_stats(target, active, minimum=3):
     if not target.get('price_m2') or target.get('category') != 'plot': return None,None,0,'brak'
     pool=[x for x in active if _valid_plot(x) and x.get('canonical_url')!=target.get('canonical_url')]
     tb=size_bucket(target.get('area_m2')); tp=target.get('plot_type') or 'nieustalona'; tplan=planning_bucket(target.get('planning_status'))
-    levels=[
-        ('wysoka',[x for x in pool if (x.get('plot_type') or 'nieustalona')==tp and size_bucket(x.get('area_m2'))==tb and planning_bucket(x.get('planning_status'))==tplan]),
-        ('dobra',[x for x in pool if (x.get('plot_type') or 'nieustalona')==tp and size_bucket(x.get('area_m2'))==tb]),
-        ('średnia',[x for x in pool if size_bucket(x.get('area_m2'))==tb and planning_bucket(x.get('planning_status'))==tplan]),
-        ('orientacyjna',[x for x in pool if size_bucket(x.get('area_m2'))==tb]),
-        ('słaba',[x for x in pool if (x.get('plot_type') or 'nieustalona')==tp]),
-    ]
+
+    # Do not call an agricultural/unknown plot a comparable for a service/building
+    # plot merely to reach n=3. That produced impressive-looking but meaningless
+    # percentages. For a known plot type we stay within that type; if there are too
+    # few records, the honest answer is "za mało danych".
+    if tp not in {'nieustalona','n/d',''}:
+        same=[x for x in pool if (x.get('plot_type') or 'nieustalona')==tp]
+        levels=[
+            ('wysoka',[x for x in same if size_bucket(x.get('area_m2'))==tb and planning_bucket(x.get('planning_status'))==tplan]),
+            ('dobra',[x for x in same if size_bucket(x.get('area_m2'))==tb]),
+            ('orientacyjna',same),
+        ]
+    else:
+        levels=[
+            ('dobra',[x for x in pool if size_bucket(x.get('area_m2'))==tb and planning_bucket(x.get('planning_status'))==tplan]),
+            ('orientacyjna',[x for x in pool if size_bucket(x.get('area_m2'))==tb]),
+        ]
     for quality,rows in levels:
         vals=[float(x['price_m2']) for x in rows]
         if len(vals)>=minimum: return median(vals),mean(vals),len(vals),quality

@@ -76,3 +76,50 @@ assert r["area_m2"] == 5400, r
 assert r["price"] == 199000, r
 
 print('SELFTEST OK v1.2.2')
+
+# v1.2.5: search-link extraction must work on server-rendered OLX/Otodom style HTML.
+import re as _re
+from app.scraper import Scraper
+_pat_olx=_re.compile(r"https?://(?:www\.)?olx\.pl/d/oferta/[^?#]+",_re.I)
+links,nxt=Scraper._extract_links_from_html(
+    'https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zakliczyn/',
+    '<a href="/d/oferta/dzialka-zdonia-CID3-IDabc.html">x</a><a rel="next" href="?page=2">Następna</a>',
+    _pat_olx,
+)
+assert len(links)==1 and 'olx.pl/d/oferta/' in links[0], links
+assert nxt and 'page=2' in nxt, nxt
+
+_pat_oto=_re.compile(r"https?://(?:www\.)?otodom\.pl/pl/oferta/[^?#]+",_re.I)
+links,_=Scraper._extract_links_from_html(
+    'https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zakliczyn/',
+    '<a href="https://www.otodom.pl/pl/oferta/dzialka-zakliczyn-ID4xyz">oto</a>',
+    _pat_oto,
+)
+assert len(links)==1 and 'otodom.pl/pl/oferta/' in links[0], links
+print('SELFTEST OK v1.2.5 discovery')
+
+# v1.2.6: RCN raw values use Polish formatting and hectare areas.
+from app.rcn import _num as rcn_num, _ha_to_m2, _date as rcn_date
+assert rcn_num('1.000.000,00') == 1000000.0
+assert rcn_num('75.000') == 75000.0
+assert _ha_to_m2('0,5500') == 5500.0
+assert _ha_to_m2('1.000') == 10000.0
+assert rcn_date('2026-03-10').startswith('2026-03-10'), rcn_date('2026-03-10')
+# Future RCN rows must never be accepted into the benchmark.
+assert rcn_date('2099-01-01') is None
+
+# v1.2.6: title area wins when portal page contains unrelated/recommended areas.
+mor_html="""<html><head><meta property='og:title' content='Działka na sprzedaż 3 200 m² | Paleśnica | Morizon.pl'></head>
+<body><main>Cena 170 000 zł. Paleśnica. Polecane: Powierzchnia działki 14 643 m².</main></body></html>"""
+mor=parse_detail(mor_html,'https://www.morizon.pl/oferta/test','Morizon','plot')
+assert mor['area_m2']==3200,mor
+
+# v1.2.6: actual Sprzedajemy listing shape, no category/search-page artifact.
+spr_html="""<html><head><meta property='og:title' content='Działka budowlana Wesołów 10 ar'><meta property='product:price:amount' content='75000'></head>
+<body><main>03 Maj 07:27 Cena za m² 75 zł/m² Powierzchnia 1000 m² Wesołów. 75 000 zł 75 zł/m²</main></body></html>"""
+spr=parse_detail(spr_html,'https://sprzedajemy.pl/dzialka-wesolow-4-1b8e55-nr67779073','Sprzedajemy','plot')
+assert spr['price']==75000,spr
+assert spr['area_m2']==1000,spr
+assert spr['published_text'],spr
+assert normalize_published(spr['published_text']) is not None,spr
+print('SELFTEST OK v1.2.6 RCN/parser')

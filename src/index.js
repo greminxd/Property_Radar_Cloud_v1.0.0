@@ -173,6 +173,14 @@ function ppm(v) {
   return `${Number(v).toFixed(2).replace('.', ',')} zł/m²`;
 }
 
+function trustedRcn(r) {
+  const med=Number(r?.rcn_median_ppm), n=Number(r?.rcn_count||0);
+  const q=String(r?.rcn_quality||'').toLowerCase();
+  const last=r?.rcn_last_date?new Date(r.rcn_last_date).getTime():null;
+  const dateOk=last==null || (Number.isFinite(last) && last<=Date.now()+86400000);
+  return Number.isFinite(med) && med>=0.5 && med<=3000 && n>=3 && dateOk && !q.startsWith('brak') && !q.startsWith('za mało');
+}
+
 function sizeBadge(v) {
   v = Number(v || 0);
   if (v >= 10000) return '👑 1 HA+';
@@ -195,7 +203,7 @@ function listingText(r, mode = 'new') {
   else lines.push(`🗓 Data dodania: <b>nieustalona</b>`);
   if (r.plot_type) lines.push(`🏷 ${escapeHtml(r.plot_type)} • 🏗 ${escapeHtml(r.planning_status || 'nieustalone')}`);
   if (r.median_comparable) lines.push(`📢 Ogłoszenia: mediana <b>${ppm(r.median_comparable)}</b> • średnia ${ppm(r.market_mean_comparable)} (${r.comparable_count || 0})`);
-  if (r.rcn_median_ppm) {
+  if (trustedRcn(r)) {
     lines.push(`🏛 RCN ${r.rcn_months || 24} mies.: mediana <b>${ppm(r.rcn_median_ppm)}</b> • średnia ${ppm(r.rcn_mean_ppm)} (${r.rcn_count || 0} trans., ≤${r.rcn_radius_km || '?'} km)`);
     if (r.rcn_last_date) lines.push(`🧾 Ostatnia transakcja: ${plDateOnly(r.rcn_last_date)} • ${ppm(r.rcn_last_ppm)}`);
   }
@@ -216,7 +224,7 @@ function mainMenu(origin, role = 'user') {
     [{ text: '🆕 Nowe ogłoszenia', callback_data: 'list:new' }, { text: '📉 Zmiany cen', callback_data: 'list:price' }],
     [{ text: '🤖 Status bota', callback_data: 'status:short' }, { text: '🗃 Status bazy', callback_data: 'database' }],
   ];
-  if (role === 'admin') rows.push([{ text: '🧪 Diagnostyka', callback_data: 'diag' }]);
+  if (role === 'admin') { rows.push([{ text: '🔄 Skanuj teraz', callback_data: 'scan:run' }]); rows.push([{ text: '🧪 Diagnostyka', callback_data: 'diag' }]); }
   return { inline_keyboard: rows };
 }
 
@@ -258,15 +266,15 @@ async function databaseStats(env) {
     env.DB.prepare(`SELECT price_m2 FROM listings
       WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 5000 ORDER BY price_m2`),
     env.DB.prepare(`SELECT AVG(price_m2) avg_rcn, COUNT(*) rcn_count, MAX(transaction_date) rcn_last_date
-      FROM rcn_transactions WHERE price_m2 BETWEEN 0.1 AND 5000
-      AND julianday(transaction_date)>=julianday('now','-24 months')`),
+      FROM rcn_transactions WHERE price_m2 BETWEEN 0.5 AND 3000
+      AND julianday(transaction_date)>=julianday('now','-24 months') AND julianday(transaction_date)<=julianday('now','+1 day')`),
     env.DB.prepare(`SELECT price_m2 rcn_last_ppm, transaction_date, parcel_number FROM rcn_transactions
-      WHERE price_m2 BETWEEN 0.1 AND 5000
-      AND julianday(transaction_date)>=julianday('now','-24 months')
+      WHERE price_m2 BETWEEN 0.5 AND 3000
+      AND julianday(transaction_date)>=julianday('now','-24 months') AND julianday(transaction_date)<=julianday('now','+1 day')
       ORDER BY transaction_date DESC LIMIT 1`),
     env.DB.prepare(`SELECT price_m2 FROM rcn_transactions
-      WHERE price_m2 BETWEEN 0.1 AND 5000
-      AND julianday(transaction_date)>=julianday('now','-24 months') ORDER BY price_m2`),
+      WHERE price_m2 BETWEEN 0.5 AND 3000
+      AND julianday(transaction_date)>=julianday('now','-24 months') AND julianday(transaction_date)<=julianday('now','+1 day') ORDER BY price_m2`),
     env.DB.prepare(`SELECT COALESCE(NULLIF(area_locality,''),NULLIF(location,''),'?') name, COUNT(*) n
       FROM listings WHERE active=1 AND category='plot' GROUP BY name ORDER BY n DESC LIMIT 20`),
     env.DB.prepare(`SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1`),
@@ -340,7 +348,7 @@ function statusLongText(s) {
     `🌐 Źródła OK: <b>${good.length}/${s.diagnostics?.length||0}</b> • błędne/niepewne: <b>${bad.length}</b>`,``,...sourceLines,
     ``,`📦 Ostatni skan: pobrano ${s.last_scan?.downloaded_records??'—'} • przyjęto ${s.last_scan?.accepted_records??'—'} • nowe ${s.last_scan?.new_count??'—'} • istotne zmiany cen ${s.last_scan?.price_change_count??'—'}`,
     `🚫 Odrzucone ${s.last_scan?.rejected_count??'—'} • wygaszone ${s.last_scan?.deactivated_count??'—'}`,
-    ``,`⏰ Następny: <b>${s.next_scan}</b> • maks. 2 skany/dzień`,`🧯 Ostatni błąd: ${escapeHtml(s.system?.last_error?.value||'brak')}`].join('\n');
+    ``,`⏰ Następny automatyczny: <b>${s.next_scan}</b> • ręczny skan bez limitu`,`🧯 Ostatni błąd: ${escapeHtml(s.system?.last_error?.value||'brak')}`].join('\n');
 }
 
 function databaseStatusText(s) {
@@ -364,7 +372,7 @@ function databaseStatusText(s) {
 }
 
 async function listForBot(env, mode) {
-  if(mode==='price') return (await env.DB.prepare(`SELECT * FROM listings WHERE last_meaningful_price_change_at IS NOT NULL AND julianday(last_meaningful_price_change_at)>=julianday('now','-30 days') ORDER BY last_meaningful_price_change_at DESC LIMIT 6`).all()).results||[];
+  if(mode==='price') return (await env.DB.prepare(`SELECT * FROM listings WHERE active=1 AND category='plot' AND COALESCE(source_status,'active')<>'archived' AND last_meaningful_price_change_at IS NOT NULL AND julianday(last_meaningful_price_change_at)>=julianday('now','-30 days') ORDER BY last_meaningful_price_change_at DESC LIMIT 6`).all()).results||[];
   return (await env.DB.prepare(`SELECT * FROM listings WHERE active=1 AND category='plot' AND published_at IS NOT NULL AND julianday(published_at)>=julianday('now','-3 day') ORDER BY published_at DESC LIMIT 6`).all()).results||[];
 }
 
@@ -376,7 +384,7 @@ function haversineKm(lat1,lon1,lat2,lon2){
 
 async function nearbyRcn(env,listing){
   if(!listing?.lat||!listing?.lon)return [];
-  const rows=(await env.DB.prepare(`SELECT transaction_date,price,area_m2,price_m2,parcel_number,mpzp,use_type,address,lat,lon FROM rcn_transactions WHERE lat IS NOT NULL AND lon IS NOT NULL AND julianday(transaction_date)>=julianday('now','-24 months') ORDER BY transaction_date DESC LIMIT 2500`).all()).results||[];
+  const rows=(await env.DB.prepare(`SELECT transaction_date,price,area_m2,price_m2,parcel_number,mpzp,use_type,address,lat,lon FROM rcn_transactions WHERE lat IS NOT NULL AND lon IS NOT NULL AND price_m2 BETWEEN 0.5 AND 3000 AND julianday(transaction_date)>=julianday('now','-24 months') AND julianday(transaction_date)<=julianday('now','+1 day') ORDER BY transaction_date DESC LIMIT 2500`).all()).results||[];
   const targetArea=Number(listing.area_m2||0),limitRadius=Number(listing.rcn_radius_km||10);
   return rows.map(t=>({...t,distance_km:haversineKm(listing.lat,listing.lon,t.lat,t.lon)})).filter(t=>{
     if(t.distance_km>limitRadius)return false;
@@ -479,6 +487,14 @@ Skan automatyczny: <b>09:00 / 20:00</b>.`,mainMenu(origin,role));
     if(data==='status:long'){const s=await botStatus(env);return await done(send(statusLongText(s),{inline_keyboard:[[{text:'📊 Krótki status',callback_data:'status:short'}],[{text:'⬅️ Menu',callback_data:'menu'}]]}));}
     if(data==='database'){const d=await databaseStats(env);return await done(send(databaseStatusText(d)));}
     if(data==='menu'){return await done(send(`🏡 <b>PROPERTY RADAR</b>\nWybierz funkcję:`,mainMenu(origin,role)));}
+    if(data==='scan:run'){
+      if(role!=='admin') return await done(send('⛔ Ręczny skan tylko dla administratora.'));
+      await ack;
+      await send('🔄 <b>Zlecam skan…</b> GitHub Actions uruchomi go teraz lub ustawi w kolejce, jeśli poprzedni jeszcze pracuje.');
+      const d=await dispatchScan(env);
+      await send(d.ok?'✅ <b>Skan zlecony.</b> Nie ma limitu ręcznych uruchomień.':`⚠️ ${escapeHtml(d.message)}`,mainMenu(origin,role));
+      return new Response('ok');
+    }
     if(data==='diag'){
       if(role!=='admin'){await send('⛔ Diagnostyka tylko dla administratora.');return new Response('ok');}
       let db='OK';try{await env.DB.prepare('SELECT 1').first();}catch(e){db='BŁĄD: '+String(e?.message||e)}
@@ -509,7 +525,7 @@ user_id: <code>${escapeHtml(userId)}</code>`);
   } else if(text==='/statuspelny') await send(statusLongText(await botStatus(env)));
   else if(text==='/status') await send(statusShortText(await botStatus(env)),{inline_keyboard:[[{text:'📋 Pełny status',callback_data:'status:long'}],[{text:'⬅️ Menu',callback_data:'menu'}]]});
   else if(text==='/baza') await send(databaseStatusText(await databaseStats(env)));
-  else if(text==='/skanuj'&&role==='admin'){const d=await dispatchScan(env);await send(d.ok?'🔄 Skan zlecony. Twardy limit pozostaje 2 zakończone skany/dzień.':`⚠️ ${escapeHtml(d.message)}`);}
+  else if(text==='/skanuj'&&role==='admin'){await send('🔄 <b>Zlecam skan…</b>');const d=await dispatchScan(env);await send(d.ok?'✅ Skan zlecony. Brak limitu ręcznych uruchomień.':`⚠️ ${escapeHtml(d.message)}`);}
   else await send(`🏡 <b>PROPERTY RADAR</b>
 Alerty tylko dla faktycznie nowych publikacji i istotnych zmian ceny.
 Skan automatyczny: <b>09:00 / 20:00</b>.`,mainMenu(origin,role));
@@ -546,7 +562,7 @@ async function handleApi(req, env, url) {
   if (url.pathname === '/api/listings') {
     // Mini App is plots-only. Legacy houses/garages can remain in D1 for audit/history,
     // but they are never returned to the user-facing listing browser.
-    const rows = await env.DB.prepare(`SELECT * FROM listings WHERE category='plot' ORDER BY COALESCE(published_at,first_seen) DESC, id DESC LIMIT 2500`).all();
+    const rows = await env.DB.prepare(`SELECT * FROM listings WHERE category='plot' AND COALESCE(source_status,'active')<>'invalid-parser' ORDER BY COALESCE(published_at,first_seen) DESC, id DESC LIMIT 2500`).all();
     return json({ listings: rows.results || [], stats: await databaseStats(env) });
   }
 

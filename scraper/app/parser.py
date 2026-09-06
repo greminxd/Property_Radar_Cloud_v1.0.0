@@ -204,7 +204,7 @@ def _jsonld_plot_area(objs) -> tuple[float | None,str | None]:
     strong_keys={'lotsize','landarea','plotarea','parcelarea','lotarea','plotsize'}
     stack=list(objs or [])
     while stack:
-        o=stack.pop()
+        o=stack.pop(0)
         if isinstance(o,list):stack.extend(o);continue
         if not isinstance(o,dict):continue
         # additionalProperty / PropertyValue style: name=Powierzchnia działki, value=37000
@@ -244,6 +244,65 @@ def _explicit_plot_area(text: str) -> tuple[float | None,str | None,str | None]:
     return None,None,None
 
 
+def _total_price_from_text(text: str) -> float | None:
+    """Extract total PLN price while explicitly ignoring price-per-m² labels."""
+    vals=[]
+    rx=re.compile(r"(\d[\d\s\xa0.,]{1,18})\s*(?:zł|PLN)\b",re.I)
+    for m in rx.finditer(text or ''):
+        before=asciifold((text or '')[max(0,m.start()-35):m.start()])
+        after=asciifold((text or '')[m.end():m.end()+18])
+        if 'cena za m' in before or re.match(r'\s*/\s*m(?:2|²)',after):
+            continue
+        n=parse_price(m.group(0))
+        if n and 100 <= n <= 1_000_000_000:
+            vals.append(n)
+    if not vals:return None
+    # On a focused listing body the total offer price is normally the largest PLN
+    # amount; per-m² values were removed above.
+    return max(vals)
+
+
+def _sprzedajemy_plot_area(text: str) -> float | None:
+    m=re.search(rf"\bPowierzchnia\s*[:\-]?\s*{_AREA_TOKEN}",text or '',re.I)
+    if not m:return None
+    return _area_token_to_m2(m.group(m.lastindex-1),m.group(m.lastindex))
+
+
+def _strong_price_from_soup(soup: BeautifulSoup) -> float | None:
+    """Prefer listing-level structured price over arbitrary currency in page chrome."""
+    for tag in [
+        soup.find("meta", attrs={"property":"product:price:amount"}),
+        soup.find("meta", attrs={"itemprop":"price"}),
+        soup.find(attrs={"itemprop":"price"}),
+    ]:
+        if not tag:
+            continue
+        raw=tag.get("content") or tag.get("value") or tag.get_text(" ",strip=True)
+        if not raw:
+            continue
+        t=clean_text(str(raw))
+        # Feed a synthetic PLN suffix to the mature price parser first.
+        n=parse_price(t+" zł")
+        if n and 100 <= n <= 1_000_000_000:
+            return n
+        try:
+            n=float(t.replace('\xa0','').replace(' ','').replace('.','').replace(',','.'))
+            if 100 <= n <= 1_000_000_000:return n
+        except Exception:pass
+    return None
+
+
+def _sprzedajemy_date(soup: BeautifulSoup, text: str) -> str:
+    """Sprzedajemy often exposes publication as '03 Maj 07:27' without a label/year."""
+    # A listing-level <time datetime> is the strongest source.
+    for t in soup.find_all('time', limit=4):
+        raw=t.get('datetime') or clean_text(t.get_text(' ',strip=True))
+        if raw and re.search(r'\d',str(raw)):
+            return clean_text(str(raw))[:100]
+    m=re.search(r'\b(\d{1,2}\s+(?:Sty|Lut|Mar|Kwi|Maj|Cze|Lip|Sie|Wrz|Pa[zź]|Lis|Gru)[a-ząćęłńóśźż]*\s+\d{1,2}:\d{2})\b',text or '',re.I)
+    return clean_text(m.group(1))[:100] if m else ''
+
+
 def parse_detail(html: str, url: str, source: str, category_hint: str | None = None):
     soup=BeautifulSoup(html,"lxml")
     objs=jsonld_objects(soup)
@@ -252,14 +311,18 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
     meta_title=_find_meta(soup,"og:title","twitter:title") or clean_text((soup.title.string if soup.title else ""))
     h1=clean_text((soup.find("h1").get_text(" ",strip=True) if soup.find("h1") else ""))
     title=h1 if h1 and len(h1)>=8 else meta_title
+    main=soup.find("main") or soup.find("article")
+    main_text=clean_text(main.get_text(" ",strip=True))[:9000] if main else body[:6000]
     desc=_find_meta(soup,"og:description","description")
     if not desc:
-        # Prefer visible main/article content over the whole footer-heavy page.
-        main=soup.find("main") or soup.find("article")
-        desc=clean_text(main.get_text(" ",strip=True))[:10000] if main else body[:7000]
-    combined=clean_text(title+" "+desc+" "+body[:16000])
+        desc=main_text[:8000] if main_text else body[:5000]
+    # Keep core-field parsing tightly scoped to the listing itself. The old parser
+    # searched up to 16k of the whole page and could steal a price/area from a
+    # recommended listing below the actual offer (e.g. Morizon 3200 -> 14643 m²).
+    focused=clean_text(title+" "+desc[:4500]+" "+main_text[:6500])
+    combined=clean_text(focused+" "+body[:8000])
 
-    price=None; structured_loc=""; published=""; updated=""
+    price=_strong_price_from_soup(soup); structured_loc=""; published=""; updated=""
     for o in objs:
         if not isinstance(o,dict): continue
         offers=o.get("offers")
@@ -278,23 +341,43 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
         if not updated: updated=clean_text(str(o.get("dateModified") or ""))
 
     if price is None: price=_embedded_price(payloads)
-    if price is None: price=parse_price(combined)
+    if source=="Sprzedajemy" and price is None:
+        price=_total_price_from_text(focused)
+    if price is None: price=parse_price(focused)
+    if price is None: price=parse_price(body[:4500])
 
     # Determine object type before choosing an area. A house page can contain both
     # 350 m² floor area and 37 000 m² parcel area; generic first/most-common-number
     # heuristics are not safe for that.
-    cat=classify_category(title,url,combined,category_hint=category_hint)
+    cat=classify_category(title,url,focused,category_hint=category_hint)
     strong_area,strong_source=_jsonld_plot_area(objs)
     strong_raw=None
+    # An explicit land-area label within the focused listing text beats generic values.
     if strong_area is None:
-        strong_area,strong_source,strong_raw=_explicit_plot_area(combined)
+        strong_area,strong_source,strong_raw=_explicit_plot_area(focused)
+    if strong_area is None and source=="Sprzedajemy" and cat=="plot":
+        strong_area=_sprzedajemy_plot_area(focused)
+        if strong_area is not None: strong_source='sprzedajemy:Powierzchnia'
+    # Plot titles are especially trustworthy: "Działka na sprzedaż 3 200 m²".
+    # This prevents recommendation/footer areas from replacing the advertised area.
+    title_area,title_raw=best_area(title) if cat=="plot" else (None,None)
     if strong_area is not None:
         area=strong_area
-        # Different floor/building areas are not a contradiction when parcel area is explicit.
+        awarn=None
+        # If the title itself explicitly advertises a plot area and structured data
+        # differs wildly, prefer the title. This catches portals that embed JSON-LD
+        # for recommended offers alongside the main listing.
+        if title_area is not None:
+            ratio=max(strong_area,title_area)/max(1,min(strong_area,title_area))
+            if ratio>=1.5:
+                area=title_area
+                awarn=f"⚠️ Metraż skorygowany z danych strony ({strong_area:g} m²) wg tytułu ({title_area:g} m²)"
+    elif title_area is not None:
+        area=title_area
         awarn=None
     else:
-        area,_=best_area(combined)
-        awarn=area_warning(combined)
+        area,_=best_area(focused)
+        awarn=area_warning(focused)
     phone=_phone_from_soup(soup, desc+" "+body)
     if not published:
         v=_embedded_first(payloads,["datePosted","datePublished","publishedAt","createdAt","createdDate","creationDate"])
@@ -302,11 +385,13 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
     if not updated:
         v=_embedded_first(payloads,["dateModified","updatedAt","lastModified","refreshDate","pushedAt"])
         if isinstance(v,str): updated=clean_text(v)
+    if not published and source=="Sprzedajemy":
+        published=_sprzedajemy_date(soup, focused)
     if not published:
-        dm=re.search(r"(?:Dodano|Dodane|Dodano dnia|Dodane dnia|Opublikowano|Data dodania|Data publikacji)\s*[:–-]?\s*([^|\n]{4,55})", combined, re.I)
+        dm=re.search(r"(?:Dodano|Dodane|Dodano dnia|Dodane dnia|Opublikowano|Data dodania|Data publikacji)\s*[:–-]?\s*([^|\n]{4,55})", focused, re.I)
         if dm: published=clean_text(dm.group(1))
     if not updated:
-        um=re.search(r"(?:Aktualizacja|Zaktualizowano|Zaktualizowane|Zaktualizowana|Odświeżono(?: dnia)?|Odswiezono(?: dnia)?|Odświeżone|Odswiezone|Podbite|Data aktualizacji)\s*[:–-]?\s*([^|\n]{4,55})", combined, re.I)
+        um=re.search(r"(?:Aktualizacja|Zaktualizowano|Zaktualizowane|Zaktualizowana|Odświeżono(?: dnia)?|Odswiezono(?: dnia)?|Odświeżone|Odswiezone|Podbite|Data aktualizacji)\s*[:–-]?\s*([^|\n]{4,55})", focused, re.I)
         if um: updated=clean_text(um.group(1))
 
     af=asciifold(combined[:12000])
@@ -367,6 +452,15 @@ def refine_from_rendered_text(rec: dict, visible_text: str) -> dict:
         return rec
     early=text[:9000]
     # Dynamic page fallback: recover the core listing fields from rendered text.
+    if rec.get("category")=="plot":
+        ta,_=best_area(rec.get("title") or "")
+        if ta is not None and rec.get("area_m2"):
+            try:
+                ratio=max(float(ta),float(rec["area_m2"]))/max(1,min(float(ta),float(rec["area_m2"])))
+                if ratio>=1.5:
+                    rec["area_warning"]=f"⚠️ Metraż skorygowany wg tytułu: {ta:g} m²"
+                    rec["area_m2"]=ta
+            except Exception:pass
     if rec.get("price") is None:
         rec["price"]=parse_price(early)
     if rec.get("area_m2") is None and rec.get("category")=="plot":
@@ -403,6 +497,9 @@ def refine_from_rendered_text(rec: dict, visible_text: str) -> dict:
     if not rec.get("published_text"):
         dm=re.search(r"(?:Dodano|Dodane|Dodano dnia|Dodane dnia|Opublikowano|Data dodania|Data publikacji)\s*[:–-]?\s*([^|\n]{4,55})", early, re.I)
         if dm: rec["published_text"]=clean_text(dm.group(1))[:100]
+    if not rec.get("published_text") and rec.get("source")=="Sprzedajemy":
+        dm=re.search(r"\b(\d{1,2}\s+(?:Sty|Lut|Mar|Kwi|Maj|Cze|Lip|Sie|Wrz|Pa[zź]|Lis|Gru)[a-ząćęłńóśźż]*\s+\d{1,2}:\d{2})\b",early,re.I)
+        if dm:rec["published_text"]=clean_text(dm.group(1))[:100]
     if not rec.get("updated_text"):
         um=re.search(r"(?:Aktualizacja|Zaktualizowano|Zaktualizowane|Zaktualizowana|Odświeżono(?: dnia)?|Odswiezono(?: dnia)?|Odświeżone|Odswiezone|Podbite|Data aktualizacji)\s*[:–-]?\s*([^|\n]{4,55})", early, re.I)
         if um: rec["updated_text"]=clean_text(um.group(1))[:100]

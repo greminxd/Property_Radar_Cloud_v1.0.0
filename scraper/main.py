@@ -14,10 +14,11 @@ from app.utils import haversine_km,fingerprint
 from app.dates import normalize_published
 from app.scoring import enrich_scores
 from app.telegram_notify import TelegramNotify,listing_message
-from app.rcn import RCNClient
+from app.rcn import RCNClient, RCN_PARSER_VERSION
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
+LISTING_PARSER_VERSION='1.2.6-focused-fields-sprzedajemy-v2'
 
 def need(name):
     v=os.getenv(name,'').strip()
@@ -62,11 +63,11 @@ async def run():
         warsaw=ZoneInfo('Europe/Warsaw'); now_local=datetime.now(warsaw)
         day_start_local=now_local.replace(hour=0,minute=0,second=0,microsecond=0); day_end_local=day_start_local+timedelta(days=1)
         scans_today=db.count_scans_between(day_start_local.astimezone(timezone.utc).isoformat(),day_end_local.astimezone(timezone.utc).isoformat())
-        print(f'[BOOT] D1 OK | database_new={database_was_new} | scans_today={scans_today}/2', flush=True)
-        if scans_today >= 2:
-            print('[LIMIT] Dzienny limit 2 skanów osiągnięty — kończę bez Chromium.', flush=True)
-            db.set_state('scan_status','idle'); db.set_state('scan_phase','limit 2/day')
-            db.close(); return
+        purged_bad_sprzedajemy=db.purge_invalid_sprzedajemy()
+        lpv=db.query("SELECT value FROM system_state WHERE key='listing_parser_version'")
+        previous_listing_parser=(lpv[0].get('value') if lpv else None)
+        parser_migration=previous_listing_parser!=LISTING_PARSER_VERSION
+        print(f'[BOOT] D1 OK | database_new={database_was_new} | scans_today={scans_today} | limit=OFF | purged_bad_sprzedajemy={purged_bad_sprzedajemy} | parser_migration={parser_migration}', flush=True)
     except Exception as e:
         try: db.set_state('scan_status','error');db.set_state('last_error',f'D1 preflight: {type(e).__name__}: {e}')
         except:pass
@@ -144,16 +145,26 @@ async def run():
         db.set_state('scan_phase','RCN transakcje')
         rcfg=cfg['rcn']; months=int(rcfg.get('months',24))
         cutoff=(datetime.now(timezone.utc)-timedelta(days=months*31+60)).isoformat()
-        # RCN is historical data and does not need downloading twice per day. Refresh at most once per local day;
-        # otherwise use the D1 cache. This saves requests/writes while keeping the 24-month window current.
+        # Parser v3 fixes RCN units/date/price pairing. Invalidate any cache produced by
+        # an older parser; otherwise bad historical rows would keep poisoning medians.
+        state=db.query("SELECT value FROM system_state WHERE key='rcn_parser_version'")
+        current_version=(state[0].get('value') if state else None)
+        force_rcn_refresh=current_version!=RCN_PARSER_VERSION
+        if force_rcn_refresh:
+            print(f'[RCN] parser cache migration {current_version!r} -> {RCN_PARSER_VERSION}; czyszczę stare transakcje',flush=True)
+            db.execute('DELETE FROM rcn_transactions')
+            db.set_state('rcn_parser_version',RCN_PARSER_VERSION)
+        # RCN is historical data; normal refresh remains once per local day, but a
+        # parser-version migration always forces a fresh download.
         last_rcn=db.query("SELECT MAX(fetched_at) last_fetch FROM rcn_transactions")
         last_fetch=(last_rcn[0].get('last_fetch') if last_rcn else None)
         refresh=True
-        if last_fetch:
+        if last_fetch and not force_rcn_refresh:
             try:
                 lf=datetime.fromisoformat(str(last_fetch).replace('Z','+00:00')).astimezone(ZoneInfo('Europe/Warsaw'))
                 refresh=lf.date()!=datetime.now(ZoneInfo('Europe/Warsaw')).date()
             except Exception: pass
+        if force_rcn_refresh: refresh=True
         if refresh:
             try:
                 rc=RCNClient(cfg['center']['lat'],cfg['center']['lon'],rcfg)
@@ -176,6 +187,10 @@ async def run():
     rc_an=RCNClient(cfg['center']['lat'],cfg['center']['lon'],cfg.get('rcn',{})) if cfg.get('rcn',{}).get('enabled',True) else None
     for r in active:
         enrich_scores(r,unique,cfg)
+        # Never retain a stale/broken RCN score if the current scan cannot build a
+        # trustworthy comparable set.
+        for k in ['rcn_median_ppm','rcn_mean_ppm','rcn_radius_km','rcn_last_date','rcn_last_ppm']: r[k]=None
+        r['rcn_count']=0; r['rcn_months']=int(cfg.get('rcn',{}).get('months',24)); r['rcn_quality']='brak wiarygodnych porównań'
         if rc_an and rcn_rows:
             r.update(rc_an.analyze(r,rcn_rows,int(cfg['rcn'].get('months',24)),int(cfg['rcn'].get('minimum_comparables',3))))
     db.update_scores(active)
@@ -190,9 +205,14 @@ async def run():
         # Price alert uses a persistent reference price, not only the immediately previous tiny edit.
         # Example: 300000 -> 299000 -> 295000 still alerts at 295000 because the cumulative change is 5000.
         ref=reference_price if reference_price is not None else old_price
-        if price_changed and r.get('active',1) and meaningful_price_change(ref,r.get('price'),cfg):
-            meaningful_changes+=1;db.mark_meaningful_price_change(r['canonical_url'],ref,float(r['price']))
-            notify.append((r,'price',ref))
+        if price_changed and r.get('active',1):
+            if parser_migration:
+                # First scan after a parser upgrade establishes a clean reference price.
+                # Parser corrections are not real market price changes.
+                if r.get('price') is not None: db.reset_price_alert_reference(r['canonical_url'],float(r['price']))
+            elif meaningful_price_change(ref,r.get('price'),cfg):
+                meaningful_changes+=1;db.mark_meaningful_price_change(r['canonical_url'],ref,float(r['price']))
+                notify.append((r,'price',ref))
     # First bootstrap is allowed to notify only genuinely fresh publications, never old discoveries.
     for r,kind,old_price in notify:
         try: tg.send(listing_message(r,kind,old_price),r.get('canonical_url'),r.get('image_url'))
@@ -201,7 +221,7 @@ async def run():
     plots=sum(1 for x in unique if x.get('category')=='plot'); phones=sum(1 for x in unique if x.get('phone'))
     ppms=[float(x['price_m2']) for x in unique if x.get('category')=='plot' and x.get('price_m2') and 1<=float(x['price_m2'])<=5000]
     market_line=f"mediana {median(ppms):.1f} zł/m² • średnia {mean(ppms):.1f} zł/m²" if ppms else 'brak danych cenowych'
-    rvals=[float(x['price_m2']) for x in rcn_rows if x.get('price_m2')]
+    rvals=[float(x['price_m2']) for x in rcn_rows if x.get('price_m2') and 0.5<=float(x['price_m2'])<=3000]
     rcn_line=f"RCN mediana {median(rvals):.1f} • średnia {mean(rvals):.1f} zł/m² ({len(rvals)} trans.)" if rvals else 'RCN: brak/awaria'
     healthy_count=sum(1 for d in diagnostics if d.get('healthy'))
     summary=(f"🏡 <b>PROPERTY RADAR — SKAN GOTOWY</b>\n"
@@ -216,6 +236,7 @@ async def run():
 
     finished=datetime.now(timezone.utc).isoformat(); status='ok' if healthy_count>=max(1,len(diagnostics)//2) else 'warning'
     db.record_scan(started_at=started,finished_at=finished,downloaded_records=len(all_recs),accepted_records=len(accepted),active_after_scan=len(unique),new_count=fresh_new,price_change_count=meaningful_changes,rejected_count=len(rejected),deactivated_count=deactivated,healthy_sources=healthy_count,total_sources=len(diagnostics),diagnostics_json=json.dumps(diagnostics,ensure_ascii=False),status=status)
+    db.set_state('listing_parser_version',LISTING_PARSER_VERSION)
     db.set_state('scan_status','idle');db.set_state('scan_phase','gotowe');db.set_state('last_scan_finished_at',finished);db.set_state('last_error','\n'.join(errs[-8:]) if errs else '')
     (LOGS/'scan_diagnostics.json').write_text(json.dumps({'downloaded':len(all_recs),'accepted':len(accepted),'active':len(unique),'fresh_new':fresh_new,'meaningful_price_changes':meaningful_changes,'rcn_transactions':len(rcn_rows),'sources':diagnostics},ensure_ascii=False,indent=2),encoding='utf-8')
     (LOGS/'rejected_area.json').write_text(json.dumps(rejected,ensure_ascii=False,indent=2),encoding='utf-8')

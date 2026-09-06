@@ -33,9 +33,17 @@ function publishedAgeDays(r){
   if(!Number.isFinite(t)) return null;
   return (Date.now()-t)/86400000;
 }
+function trustedRcn(r){
+  const med=Number(r?.rcn_median_ppm),n=Number(r?.rcn_count||0),q=String(r?.rcn_quality||'').toLowerCase();
+  const last=r?.rcn_last_date?new Date(r.rcn_last_date).getTime():null;
+  const dateOk=last==null || (Number.isFinite(last)&&last<=Date.now()+86400000);
+  return Number.isFinite(med)&&med>=0.5&&med<=3000&&n>=3&&dateOk&&!q.startsWith('brak')&&!q.startsWith('za mało');
+}
 function rcnDeltaPct(r){
-  if(!r.price_m2 || !r.rcn_median_ppm) return null;
-  return ((+r.price_m2 - +r.rcn_median_ppm) / +r.rcn_median_ppm) * 100;
+  if(!r.price_m2 || !trustedRcn(r)) return null;
+  const d=((+r.price_m2 - +r.rcn_median_ppm) / +r.rcn_median_ppm) * 100;
+  // Last-resort UI guard: unit/parser corruption must never be presented as a market insight.
+  return Number.isFinite(d) && Math.abs(d)<=1500 ? d : null;
 }
 function marketDeltaPct(r){
   if(!r.price_m2 || !r.median_comparable) return null;
@@ -83,8 +91,9 @@ async function load(){
 function renderStats(){
   $('#marketMedian').textContent=fmtPpm(stats.median_ppm);
   $('#marketMean').textContent=fmtPpm(stats.avg_ppm);
-  $('#rcnMedian').textContent=fmtPpm(stats.rcn_median_ppm);
-  $('#rcnMean').textContent=fmtPpm(stats.rcn_mean_ppm);
+  const rcnGlobalOk=Number(stats.rcn_count||0)>=3 && Number(stats.rcn_median_ppm)>=0.5 && Number(stats.rcn_median_ppm)<=3000;
+  $('#rcnMedian').textContent=rcnGlobalOk?fmtPpm(stats.rcn_median_ppm):'—';
+  $('#rcnMean').textContent=rcnGlobalOk?fmtPpm(stats.rcn_mean_ppm):'—';
   $('#rcnMeta').textContent=`Transakcje: ${stats.rcn_count||0} • ostatnia: ${dateOnly(stats.rcn_last_date)}${stats.rcn_last_ppm?` • ${fmtPpm(stats.rcn_last_ppm)}`:''} • okno: 24 miesiące`;
   $('#statActive').textContent=stats.plots||0;
   $('#stat30').textContent=stats.published30||0;
@@ -180,10 +189,10 @@ function pricePosition(r){
   return pieces.join(' • ')||'brak wystarczających porównań';
 }
 function analyticsHtml(r){
-  const marketCount=r.comparable_count||0, rcnCount=r.rcn_count||0;
+  const marketCount=r.comparable_count||0, rcnCount=r.rcn_count||0, rok=trustedRcn(r);
   return `<div class="analytics-grid">
-    <div class="analytics-box asking"><span>📢 CENY Z OGŁOSZEŃ</span><b>${fmtPpm(r.median_comparable)}</b><small>mediana • średnia ${fmtPpm(r.market_mean_comparable)} • n=${marketCount} • ${esc(r.comparison_quality||'—')}</small></div>
-    <div class="analytics-box rcn"><span>🏛 REALNE TRANSAKCJE RCN</span><b>${fmtPpm(r.rcn_median_ppm)}</b><small>mediana • średnia ${fmtPpm(r.rcn_mean_ppm)} • n=${rcnCount}${r.rcn_radius_km?` • ≤${esc(r.rcn_radius_km)} km`:''} • ${esc(r.rcn_quality||'—')}</small>${r.rcn_last_date?`<em>ostatnia: ${dateOnly(r.rcn_last_date)} • ${fmtPpm(r.rcn_last_ppm)}</em>`:''}</div>
+    <div class="analytics-box asking"><span>📢 CENY Z OGŁOSZEŃ</span><b>${marketCount>=3?fmtPpm(r.median_comparable):'—'}</b><small>${marketCount>=3?`mediana • średnia ${fmtPpm(r.market_mean_comparable)} • n=${marketCount}`:`za mało porównywalnych ofert • n=${marketCount}`} • ${esc(r.comparison_quality||'—')}</small></div>
+    <div class="analytics-box rcn"><span>🏛 REALNE TRANSAKCJE RCN</span><b>${rok?fmtPpm(r.rcn_median_ppm):'—'}</b><small>${rok?`mediana • średnia ${fmtPpm(r.rcn_mean_ppm)} • n=${rcnCount}`:`brak wiarygodnego benchmarku • n=${rcnCount}`}${r.rcn_radius_km?` • ≤${esc(r.rcn_radius_km)} km`:''} • ${esc(r.rcn_quality||'—')}</small>${rok&&r.rcn_last_date?`<em>ostatnia: ${dateOnly(r.rcn_last_date)} • ${fmtPpm(r.rcn_last_ppm)}</em>`:''}</div>
   </div>`;
 }
 function card(r){

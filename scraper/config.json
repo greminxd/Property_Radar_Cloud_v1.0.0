@@ -11,10 +11,12 @@
     "delay_between_pages_s": 0.15,
     "max_detail_pages_per_source": 80,
     "max_search_pages_per_url": 3,
-    "scroll_rounds": 3,
+    "scroll_rounds": 2,
     "parallel_sources": 3,
-    "parallel_details_per_source": 4,
-    "source_timeout_s": 300
+    "parallel_details_per_source": 3,
+    "source_timeout_s": 300,
+    "navigation_commit_timeout_ms": 12000,
+    "http_timeout_s": 12
   },
   "filters": {
     "categories": [
@@ -103,20 +105,32 @@
       "name": "Otodom",
       "enabled": true,
       "search_urls": [
-        "https://www.otodom.pl/pl/wyniki/sprzedaz/dzialka/malopolskie/tarnowski/zakliczyn/biesnik?ownerTypeSingleSelect=ALL&distanceRadius=10"
+        "https://www.otodom.pl/pl/wyniki/sprzedaz/dzialka/malopolskie/tarnowski/zakliczyn"
       ],
-      "detail_regex": "https?://(?:www\\.)?otodom\\.pl/pl/oferta/[^?#]+"
+      "detail_regex": "https?://(?:www\\.)?otodom\\.pl/pl/oferta/[^?#]+",
+      "prefer_http_discovery": true,
+      "prefer_http_details": true,
+      "fallback_discovery_urls": [
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zakliczyn/",
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zdonia/",
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-slona/",
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-palesnica/"
+      ]
     },
     {
       "name": "OLX",
       "enabled": true,
       "search_urls": [
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/zakliczyn/",
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zakliczyn/",
         "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-zdonia/",
         "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-slona/",
-        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-palesnica/"
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-palesnica/",
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-biesnik/",
+        "https://www.olx.pl/nieruchomosci/dzialki/sprzedaz/q-luslawice/"
       ],
-      "detail_regex": "https?://(?:www\\.)?olx\\.pl/d/oferta/[^?#]+"
+      "detail_regex": "https?://(?:www\\.)?olx\\.pl/d/oferta/[^?#]+",
+      "prefer_http_discovery": true,
+      "prefer_http_details": true
     },
     {
       "name": "Morizon",
@@ -132,7 +146,9 @@
       "search_urls": [
         "https://gratka.pl/nieruchomosci/dzialki-grunty/gmina-zakliczyn"
       ],
-      "detail_regex": "https?://(?:www\\.)?gratka\\.pl/nieruchomosci/[^?#]+/ob/\\d+"
+      "detail_regex": "https?://(?:www\\.)?gratka\\.pl/nieruchomosci/[^?#]+/ob/\\d+",
+      "prefer_http_discovery": true,
+      "prefer_http_details": true
     },
     {
       "name": "Nieruchomosci-online",
@@ -162,9 +178,18 @@
       "name": "Sprzedajemy",
       "enabled": true,
       "search_urls": [
-        "https://sprzedajemy.pl/zakliczyn/nieruchomosci/dzialki-grunty"
+        "https://sprzedajemy.pl/zakliczyn/nieruchomosci/grunty-i-dzialki/sprzedaz",
+        "https://sprzedajemy.pl/zdonia/nieruchomosci/grunty-i-dzialki/sprzedaz",
+        "https://sprzedajemy.pl/slona/nieruchomosci/grunty-i-dzialki/sprzedaz",
+        "https://sprzedajemy.pl/biesnik/nieruchomosci/grunty-i-dzialki/sprzedaz",
+        "https://sprzedajemy.pl/palesnica/nieruchomosci/grunty-i-dzialki/sprzedaz",
+        "https://sprzedajemy.pl/olszowa/nieruchomosci/grunty-i-dzialki/sprzedaz",
+        "https://sprzedajemy.pl/luslawice/nieruchomosci/grunty-i-dzialki/sprzedaz",
+        "https://sprzedajemy.pl/wesolow/nieruchomosci/grunty-i-dzialki/sprzedaz"
       ],
-      "detail_regex": "https?://(?:www\\.)?sprzedajemy\\.pl/[^?#]+"
+      "detail_regex": "https?://(?:www\\.)?sprzedajemy\\.pl/[^?#]*-nr\\d+",
+      "prefer_http_discovery": true,
+      "prefer_http_details": true
     },
     {
       "name": "Lento",
@@ -189,7 +214,9 @@
       "search_urls": [
         "https://tabelaofert.pl/sprzedaz/dzialki/zakliczyn"
       ],
-      "detail_regex": "https?://(?:www\\.)?tabelaofert\\.pl/oferta/[^?#,]+(?:,|%2C)\\d+"
+      "detail_regex": "https?://(?:www\\.)?tabelaofert\\.pl/oferta/[^?#,]+(?:,|%2C)\\d+",
+      "prefer_http_discovery": true,
+      "prefer_http_details": true
     }
   ],
   "rcn": {

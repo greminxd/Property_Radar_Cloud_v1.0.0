@@ -10,8 +10,15 @@ def need(k):
     return v
 
 account=need('CF_ACCOUNT_ID'); dbid=need('CF_D1_DATABASE_ID'); token=need('CF_D1_API_TOKEN')
-panel=need('PANEL_URL').rstrip('/'); bot=need('TELEGRAM_BOT_TOKEN'); webhook_secret=need('TELEGRAM_WEBHOOK_SECRET')
+DEFAULT_PANEL_URL='https://property-radar.hoolz.workers.dev'
+panel=(os.getenv('PANEL_URL','').strip() or DEFAULT_PANEL_URL).rstrip('/')
+# Old quick-tunnel URLs expire and were the reason the Telegram bottom "Oferty" button returned 502.
+# This project has a stable Worker URL, so never configure Telegram back to trycloudflare.
+if 'trycloudflare.com' in panel.lower():
+    print('[WARN] Stary PANEL_URL trycloudflare wykryty — używam stałego Worker URL')
+    panel=DEFAULT_PANEL_URL
 if not panel.startswith('https://'): raise SystemExit('PANEL_URL musi zaczynać się od https://')
+bot=need('TELEGRAM_BOT_TOKEN'); webhook_secret=need('TELEGRAM_WEBHOOK_SECRET')
 url=f'https://api.cloudflare.com/client/v4/accounts/{account}/d1/database/{dbid}/query'
 headers={'Authorization':f'Bearer {token}','Content-Type':'application/json'}
 

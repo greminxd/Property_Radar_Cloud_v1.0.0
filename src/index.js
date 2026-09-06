@@ -136,13 +136,23 @@ async function verifyTelegramInitData(initData, botToken, env) {
   }
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort('timeout'), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function telegramApi(env, method, payload) {
   if (!env.TELEGRAM_BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN missing');
-  const r = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
+  const r = await fetchWithTimeout(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload || {}),
-  });
+  }, 12000);
   const data = await r.json();
   if (!data.ok) throw new Error(data.description || `Telegram ${method} failed`);
   return data.result;
@@ -230,26 +240,71 @@ async function systemState(env) {
 }
 
 async function databaseStats(env) {
-  const total = await env.DB.prepare(`SELECT
+  // One D1 batch instead of many serial round-trips. This matters for Telegram latency.
+  const batch = await env.DB.batch([
+    env.DB.prepare(`SELECT
+      COUNT(*) total_rows,
+      SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) active_rows,
       SUM(CASE WHEN active=1 AND category='plot' THEN 1 ELSE 0 END) plots,
+      SUM(CASE WHEN active=1 AND COALESCE(category,'')<>'plot' THEN 1 ELSE 0 END) active_nonplots,
       SUM(CASE WHEN active=0 OR source_status='archived' THEN 1 ELSE 0 END) archived,
       SUM(CASE WHEN active=1 AND category='plot' AND published_at IS NOT NULL AND julianday(published_at)>=julianday('now','-30 day') THEN 1 ELSE 0 END) published30,
       SUM(CASE WHEN active=1 AND category='plot' AND published_at IS NOT NULL AND julianday(published_at)>=julianday('now','-7 day') THEN 1 ELSE 0 END) published7,
       SUM(CASE WHEN active=1 AND category='plot' AND published_at IS NULL THEN 1 ELSE 0 END) unknown_date,
       SUM(CASE WHEN active=1 AND category='plot' AND phone IS NOT NULL AND phone<>'' THEN 1 ELSE 0 END) with_phone
-    FROM listings`).first();
-  const price = await env.DB.prepare(`SELECT AVG(price_m2) avg_ppm, MIN(price_m2) min_ppm, MAX(price_m2) max_ppm FROM listings WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 5000`).first();
-  const medRows = await env.DB.prepare(`SELECT price_m2 FROM listings WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 5000 ORDER BY price_m2`).all();
-  const vals=(medRows.results||[]).map(x=>Number(x.price_m2)).filter(Number.isFinite); let med=null;
-  if(vals.length){const m=Math.floor(vals.length/2);med=vals.length%2?vals[m]:(vals[m-1]+vals[m])/2;}
-  const rcn = await env.DB.prepare(`SELECT AVG(price_m2) avg_rcn, COUNT(*) rcn_count, MAX(transaction_date) rcn_last_date FROM rcn_transactions WHERE price_m2 BETWEEN 0.1 AND 5000 AND julianday(transaction_date)>=julianday('now','-24 months')`).first();
-  const rcnLast = await env.DB.prepare(`SELECT price_m2 rcn_last_ppm, transaction_date, parcel_number FROM rcn_transactions WHERE price_m2 BETWEEN 0.1 AND 5000 AND julianday(transaction_date)>=julianday('now','-24 months') ORDER BY transaction_date DESC LIMIT 1`).first();
-  const rcnRows=await env.DB.prepare(`SELECT price_m2 FROM rcn_transactions WHERE price_m2 BETWEEN 0.1 AND 5000 AND julianday(transaction_date)>=julianday('now','-24 months') ORDER BY price_m2`).all();
-  const rv=(rcnRows.results||[]).map(x=>Number(x.price_m2)).filter(Number.isFinite);let rmed=null;
-  if(rv.length){const m=Math.floor(rv.length/2);rmed=rv.length%2?rv[m]:(rv[m-1]+rv[m])/2;}
-  const localities=(await env.DB.prepare(`SELECT COALESCE(NULLIF(area_locality,''),NULLIF(location,''),'?') name, COUNT(*) n FROM listings WHERE active=1 AND category='plot' GROUP BY name ORDER BY n DESC LIMIT 20`).all()).results||[];
-  const last=await env.DB.prepare(`SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1`).first();
-  return {...total,...price,median_ppm:med,rcn_median_ppm:rmed,rcn_mean_ppm:rcn?.avg_rcn||null,rcn_count:rcn?.rcn_count||0,rcn_last_date:rcn?.rcn_last_date||null,rcn_last_ppm:rcnLast?.rcn_last_ppm||null,rcn_last_parcel:rcnLast?.parcel_number||null,localities,last_scan:last||null};
+    FROM listings`),
+    env.DB.prepare(`SELECT AVG(price_m2) avg_ppm, MIN(price_m2) min_ppm, MAX(price_m2) max_ppm
+      FROM listings WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 5000`),
+    env.DB.prepare(`SELECT price_m2 FROM listings
+      WHERE active=1 AND category='plot' AND price_m2 BETWEEN 1 AND 5000 ORDER BY price_m2`),
+    env.DB.prepare(`SELECT AVG(price_m2) avg_rcn, COUNT(*) rcn_count, MAX(transaction_date) rcn_last_date
+      FROM rcn_transactions WHERE price_m2 BETWEEN 0.1 AND 5000
+      AND julianday(transaction_date)>=julianday('now','-24 months')`),
+    env.DB.prepare(`SELECT price_m2 rcn_last_ppm, transaction_date, parcel_number FROM rcn_transactions
+      WHERE price_m2 BETWEEN 0.1 AND 5000
+      AND julianday(transaction_date)>=julianday('now','-24 months')
+      ORDER BY transaction_date DESC LIMIT 1`),
+    env.DB.prepare(`SELECT price_m2 FROM rcn_transactions
+      WHERE price_m2 BETWEEN 0.1 AND 5000
+      AND julianday(transaction_date)>=julianday('now','-24 months') ORDER BY price_m2`),
+    env.DB.prepare(`SELECT COALESCE(NULLIF(area_locality,''),NULLIF(location,''),'?') name, COUNT(*) n
+      FROM listings WHERE active=1 AND category='plot' GROUP BY name ORDER BY n DESC LIMIT 20`),
+    env.DB.prepare(`SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1`),
+  ]);
+
+  const first = (r) => (r?.results || [])[0] || {};
+  const rows = (r) => r?.results || [];
+  const total = first(batch[0]), price = first(batch[1]);
+  const vals = rows(batch[2]).map(x=>Number(x.price_m2)).filter(Number.isFinite);
+  let med = null;
+  if (vals.length) { const m=Math.floor(vals.length/2); med=vals.length%2?vals[m]:(vals[m-1]+vals[m])/2; }
+
+  const rcn = first(batch[3]), rcnLast = first(batch[4]);
+  const rv = rows(batch[5]).map(x=>Number(x.price_m2)).filter(Number.isFinite);
+  let rmed = null;
+  if (rv.length) { const m=Math.floor(rv.length/2); rmed=rv.length%2?rv[m]:(rv[m-1]+rv[m])/2; }
+
+  return {
+    total_rows:Number(total.total_rows||0),
+    active_rows:Number(total.active_rows||0),
+    plots:Number(total.plots||0),
+    active_nonplots:Number(total.active_nonplots||0),
+    archived:Number(total.archived||0),
+    published30:Number(total.published30||0),
+    published7:Number(total.published7||0),
+    unknown_date:Number(total.unknown_date||0),
+    with_phone:Number(total.with_phone||0),
+    ...price,
+    median_ppm:med,
+    rcn_median_ppm:rmed,
+    rcn_mean_ppm:rcn?.avg_rcn||null,
+    rcn_count:Number(rcn?.rcn_count||0),
+    rcn_last_date:rcn?.rcn_last_date||null,
+    rcn_last_ppm:rcnLast?.rcn_last_ppm||null,
+    rcn_last_parcel:rcnLast?.parcel_number||null,
+    localities:rows(batch[6]),
+    last_scan:first(batch[7]),
+  };
 }
 
 function parseDiag(last) {
@@ -290,10 +345,22 @@ function statusLongText(s) {
 
 function databaseStatusText(s) {
   const loc=(s.localities||[]).map(x=>`${escapeHtml(x.name)}: <b>${x.n}</b>`).join(' • ')||'—';
-  return [`🗃 <b>STATUS BAZY</b>`,`🏡 Aktywne działki: <b>${s.plots||0}</b>`,`🕘 Dodane ≤7 dni: ${s.published7||0} • ≤30 dni: <b>${s.published30||0}</b>`,`❓ Bez daty publikacji: ${s.unknown_date||0} • archiwalne/nieaktywne: ${s.archived||0}`,
-    `☎️ Z telefonem: ${s.with_phone||0}`,``,`📢 <b>CENY Z OGŁOSZEŃ</b>`,`mediana: <b>${s.median_ppm==null?'—':ppm(s.median_ppm)}</b> • średnia: ${s.avg_ppm==null?'—':ppm(s.avg_ppm)}`,
-    ``,`🏛 <b>REALNE TRANSAKCJE RCN — 24 mies.</b>`,`mediana: <b>${s.rcn_median_ppm==null?'—':ppm(s.rcn_median_ppm)}</b> • średnia: ${s.rcn_mean_ppm==null?'—':ppm(s.rcn_mean_ppm)}`,`transakcje: ${s.rcn_count||0} • ostatnia: ${plDateOnly(s.rcn_last_date)}${s.rcn_last_ppm?` • ${ppm(s.rcn_last_ppm)}`:''}`,
-    ``,`📍 <b>AKTYWNE WG MIEJSCOWOŚCI</b>`,loc].join('\n');
+  const legacy = Number(s.active_nonplots||0);
+  return [`🗃 <b>STATUS BAZY</b>`,
+    `📦 Wszystkie rekordy: <b>${s.total_rows||0}</b> • aktywne: <b>${s.active_rows||0}</b>`,
+    `🏡 Aktywne działki: <b>${s.plots||0}</b>${legacy?` • poza nowym filtrem działek: ${legacy}`:''}`,
+    `🕘 Dodane ≤7 dni: ${s.published7||0} • ≤30 dni: <b>${s.published30||0}</b>`,
+    `❓ Aktywne działki bez daty publikacji: ${s.unknown_date||0} • archiwalne/nieaktywne: ${s.archived||0}`,
+    `☎️ Z telefonem: ${s.with_phone||0}`,
+    ``,
+    `📢 <b>CENY Z OGŁOSZEŃ</b>`,
+    `mediana: <b>${s.median_ppm==null?'—':ppm(s.median_ppm)}</b> • średnia: ${s.avg_ppm==null?'—':ppm(s.avg_ppm)}`,
+    ``,
+    `🏛 <b>REALNE TRANSAKCJE RCN — 24 mies.</b>`,
+    `mediana: <b>${s.rcn_median_ppm==null?'—':ppm(s.rcn_median_ppm)}</b> • średnia: ${s.rcn_mean_ppm==null?'—':ppm(s.rcn_mean_ppm)}`,
+    `transakcje: ${s.rcn_count||0} • ostatnia: ${plDateOnly(s.rcn_last_date)}${s.rcn_last_ppm?` • ${ppm(s.rcn_last_ppm)}`:''}`,
+    ``,
+    `📍 <b>AKTYWNE WG MIEJSCOWOŚCI</b>`,loc].join('\n');
 }
 
 async function listForBot(env, mode) {
@@ -331,7 +398,8 @@ async function dispatchScan(env) {
     };
   }
 
-  const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/scan.yml/dispatches`, {
+  const branch = String(env.GITHUB_BRANCH || 'master').trim() || 'master';
+  const r = await fetchWithTimeout(`https://api.github.com/repos/${repo}/actions/workflows/scan.yml/dispatches`, {
     method: 'POST',
     headers: {
       'authorization': `Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
@@ -340,8 +408,8 @@ async function dispatchScan(env) {
       'user-agent': 'property-radar-worker',
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ ref: 'main' }),
-  });
+    body: JSON.stringify({ ref: branch }),
+  }, 12000);
 
   const raw = await r.text();
   let body = null;
@@ -389,6 +457,20 @@ async function handleTelegram(req, env) {
 user_id: <code>${escapeHtml(userId)}</code>`,{inline_keyboard:[]});return new Response('ok');}
   if(!role){await send(`⛔ Brak dostępu.
 Twój user_id: <code>${escapeHtml(userId)}</code>`,{inline_keyboard:[]});return new Response('ok');}
+  if(!callback && text==='/start'){
+    // Repair a stale Telegram bottom menu button (e.g. an old trycloudflare tunnel)
+    // directly from the current Worker origin.
+    try {
+      await telegramApi(env,'setChatMenuButton',{
+        chat_id: chatId,
+        menu_button:{type:'web_app',text:'🏡 Oferty',web_app:{url:origin}}
+      });
+    } catch(e) { console.warn('setChatMenuButton repair failed', e?.message||e); }
+    await send(`🏡 <b>PROPERTY RADAR</b>
+Alerty tylko dla faktycznie nowych publikacji i istotnych zmian ceny.
+Skan automatyczny: <b>09:00 / 20:00</b>.`,mainMenu(origin,role));
+    return new Response('ok');
+  }
   if(callback){
     try{await telegramApi(env,'answerCallbackQuery',{callback_query_id:callback.id});}catch{}
     const data=callback.data||'';
@@ -402,7 +484,7 @@ Twój user_id: <code>${escapeHtml(userId)}</code>`,{inline_keyboard:[]});return 
       const gh=!!(env.GITHUB_DISPATCH_TOKEN&&env.GITHUB_REPO&&!String(env.GITHUB_REPO).includes('PUT_'));
       await send(`🧪 <b>DIAGNOSTYKA</b>
 D1: <b>${escapeHtml(db)}</b>
-GitHub trigger: <b>${gh?'OK':'BRAK'}</b>
+GitHub trigger: <b>${gh?'OK':'BRAK'}</b> • branch: <code>${escapeHtml(env.GITHUB_BRANCH||'master')}</code>
 Webhook: <b>${env.TELEGRAM_WEBHOOK_SECRET?'OK':'BRAK'}</b>
 Rola: <b>${escapeHtml(role)}</b>
 user_id: <code>${escapeHtml(userId)}</code>`,{inline_keyboard:[[{text:'⬅️ Menu',callback_data:'menu'}]]});return new Response('ok');
@@ -417,7 +499,7 @@ user_id: <code>${escapeHtml(userId)}</code>`,{inline_keyboard:[[{text:'⬅️ Me
     let db='OK';try{await env.DB.prepare('SELECT 1').first();}catch(e){db='BŁĄD: '+String(e?.message||e)}
     await send(`🧪 <b>DIAGNOSTYKA</b>
 D1: ${escapeHtml(db)}
-GitHub trigger: ${env.GITHUB_DISPATCH_TOKEN?'OK':'BRAK'}
+GitHub trigger: ${env.GITHUB_DISPATCH_TOKEN?'OK':'BRAK'} • branch: <code>${escapeHtml(env.GITHUB_BRANCH||'master')}</code>
 user_id: <code>${escapeHtml(userId)}</code>`);
   } else if(text==='/nowe'){
     const rows=await listForBot(env,'new');if(!rows.length)await send('Brak faktycznie nowych ogłoszeń.');for(const r of rows)await sendListing(r,'new');
@@ -461,7 +543,9 @@ async function handleApi(req, env, url) {
   if (url.pathname === '/api/stats') return json(await databaseStats(env));
 
   if (url.pathname === '/api/listings') {
-    const rows = await env.DB.prepare(`SELECT * FROM listings ORDER BY COALESCE(published_at,first_seen) DESC, id DESC LIMIT 2500`).all();
+    // Mini App is plots-only. Legacy houses/garages can remain in D1 for audit/history,
+    // but they are never returned to the user-facing listing browser.
+    const rows = await env.DB.prepare(`SELECT * FROM listings WHERE category='plot' ORDER BY COALESCE(published_at,first_seen) DESC, id DESC LIMIT 2500`).all();
     return json({ listings: rows.results || [], stats: await databaseStats(env) });
   }
 
@@ -496,11 +580,23 @@ function addSecurityHeaders(resp) {
 }
 
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
     try {
       if (url.pathname.startsWith('/api/')) return await handleApi(req, env, url);
-      if (url.pathname === '/telegram/webhook' && req.method === 'POST') return await handleTelegram(req, env);
+
+      if (url.pathname === '/telegram/webhook' && req.method === 'POST') {
+        // Telegram gets HTTP 200 immediately. Heavy D1/status work and Telegram replies
+        // continue in the background, so updates do not queue for minutes.
+        const secret=req.headers.get('X-Telegram-Bot-Api-Secret-Token')||'';
+        if(!env.TELEGRAM_WEBHOOK_SECRET||!timingSafeEqual(secret,env.TELEGRAM_WEBHOOK_SECRET)) {
+          return new Response('forbidden',{status:403});
+        }
+        const cloned=req.clone();
+        ctx.waitUntil(handleTelegram(cloned,env).catch(e=>console.error('telegram background',e)));
+        return new Response('ok',{status:200});
+      }
+
       const asset = await env.ASSETS.fetch(req);
       return addSecurityHeaders(asset);
     } catch (e) {

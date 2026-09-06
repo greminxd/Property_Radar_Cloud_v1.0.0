@@ -90,7 +90,7 @@ function renderStats(){
   $('#stat30').textContent=stats.published30||0;
   $('#statArchived').textContent=stats.archived||0;
   $('#statPhone').textContent=stats.with_phone||0;
-  $('#lastScan').textContent=`Ostatni skan: ${dateTime(stats.last_scan?.finished_at)}${stats.last_scan?` • źródła OK ${stats.last_scan.healthy_sources||0}/${stats.last_scan.total_sources||0}`:''}`;
+  $('#lastScan').textContent=`Ostatni skan: ${dateTime(stats.last_scan?.finished_at)}${stats.last_scan?` • źródła OK ${stats.last_scan.healthy_sources||0}/${stats.last_scan.total_sources||0}`:''} • baza: ${stats.total_rows||0} rekordów / ${stats.plots||0} aktywnych działek`;
 }
 
 function choiceId(prefix,v){
@@ -216,7 +216,15 @@ function presetLabel(){
 }
 function render(){
   syncInputs(); const rows=sorted(listings.filter(match)); $('#resultCount').textContent=rows.length; $('#filterCount').textContent=activeFilterCount();presetLabel();
-  $('#cards').innerHTML=rows.length?rows.map(card).join(''):`<div class="empty">Brak ofert dla tych filtrów.<br><span class="muted">Pamiętaj: domyślnie pokazujemy aktywne oferty opublikowane w ostatnich 30 dniach.</span></div>`;
+  if(rows.length){
+    $('#cards').innerHTML=rows.map(card).join('');
+  } else {
+    const activePlots=Number(stats.plots||0), unknown=Number(stats.unknown_date||0), total=Number(stats.total_rows||0);
+    const canShowAll=listings.some(r=>!isArchived(r));
+    $('#cards').innerHTML=`<div class="empty"><b>Brak działek dla bieżącego filtra.</b><br><span class="muted">Domyślnie pokazujemy aktywne oferty z datą publikacji z ostatnich 30 dni.<br>Baza D1: ${total} rekordów • aktywne działki: ${activePlots} • bez ustalonej daty publikacji: ${unknown}.</span>${canShowAll?`<br><button class="open-btn" id="emptyShowAll" type="button">Pokaż wszystkie aktywne działki z bazy</button>`:''}</div>`;
+    const showAll=$('#emptyShowAll');
+    if(showAll) showAll.addEventListener('click',()=>{state.status='active';state.age='all';quick='custom';syncStateToInputs();$$('[data-quick]').forEach(x=>x.classList.remove('active'));render();});
+  }
   $$('[data-detail]').forEach(b=>b.addEventListener('click',()=>showDetail(+b.dataset.detail)));
 }
 async function showDetail(id){

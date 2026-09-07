@@ -2,9 +2,6 @@ name: Scan nieruchomosci
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "7 9,20 * * *"
-      timezone: "Europe/Warsaw"
 
 concurrency:
   group: property-radar-scan
@@ -18,44 +15,17 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Guard stale scheduled run
-        id: schedule_gate
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [ "$EVENT_NAME" != "schedule" ]; then
-            echo "run_scan=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          hhmm=$(TZ=Europe/Warsaw date +%H%M)
-          minutes=$((10#${hhmm:0:2} * 60 + 10#${hhmm:2:2}))
-          morning=$((9 * 60 + 7))
-          evening=$((20 * 60 + 7))
-          d1=$((minutes - morning)); d2=$((minutes - evening))
-          if { [ "$d1" -ge -7 ] && [ "$d1" -le 60 ]; } || { [ "$d2" -ge -7 ] && [ "$d2" -le 60 ]; }; then
-            echo "run_scan=true" >> "$GITHUB_OUTPUT"
-            echo "Scheduled run accepted at $(TZ=Europe/Warsaw date '+%H:%M:%S %Z')"
-          else
-            echo "run_scan=false" >> "$GITHUB_OUTPUT"
-            echo "STALE scheduled run skipped at $(TZ=Europe/Warsaw date '+%H:%M:%S %Z'); allowed near 09:07/20:07"
-          fi
       - uses: actions/checkout@v6
-        if: steps.schedule_gate.outputs.run_scan == 'true'
       - uses: actions/setup-python@v6
-        if: steps.schedule_gate.outputs.run_scan == 'true'
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: scraper/requirements.txt
       - name: Install Python dependencies
-        if: steps.schedule_gate.outputs.run_scan == 'true'
         run: pip install -r scraper/requirements.txt
       - name: Install Chromium
-        if: steps.schedule_gate.outputs.run_scan == 'true'
         run: python -m playwright install --with-deps chromium
       - name: Run scan
-        if: steps.schedule_gate.outputs.run_scan == 'true'
         env:
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
@@ -69,7 +39,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: python -u scraper/main.py
       - name: Upload diagnostics
-        if: always() && steps.schedule_gate.outputs.run_scan == 'true'
+        if: always()
         uses: actions/upload-artifact@v6
         with:
           name: scan-diagnostics-${{ github.run_number }}

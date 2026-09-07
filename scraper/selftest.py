@@ -1,5 +1,5 @@
 from app.parser import parse_detail, refine_from_rendered_text
-from app.area import area_accepts
+from app.area import area_accepts, target_region_accepts
 from app.classify import classify_category, is_rental_offer, olx_url_cid
 from app.scoring import enrich_scores
 from app.utils import fingerprint
@@ -35,9 +35,27 @@ html_gromnik='''<html><head><meta property="og:title" content="Działka budowlan
 rg=parse_detail(html_gromnik,'https://www.otodom.pl/pl/oferta/test-IDx','Otodom','plot')
 assert rg['location']=='Siemiechów',rg.get('location')
 
+# v1.5.3: explicit voivodeship is a hard validation boundary. Same-named
+# villages in another region must never be re-geocoded into Małopolskie.
+ok,reg,why=target_region_accepts('Wróblowice','Dolnośląskie','')
+assert not ok and reg=='dolnośląskie' and why=='explicit-outside-region',(ok,reg,why)
+ok,reg,why=target_region_accepts('Olszyny','Warmińsko-Mazurskie','')
+assert not ok and reg=='warmińsko-mazurskie',(ok,reg,why)
+ok,reg,why=target_region_accepts('Lusławice','Małopolskie','')
+assert ok and reg=='małopolskie',(ok,reg,why)
+
+# OLX uses the generic area field `m` for flats too. Even with a broad plot hint,
+# unmistakable apartment attributes must win and classify the offer as non-plot.
+apartment_desc='Powierzchnia: 50,79 m². Liczba pokoi: 3 pokoje. Rodzaj zabudowy: Blok. Umeblowane: Nie. Mieszkanie o powierzchni 50,79 m².'
+assert classify_category('3 pokoje | 50,79 m² | balkon 6,16 m2','https://www.olx.pl/d/oferta/x-CID3-IDabc.html',apartment_desc,'plot')=='other'
+
+html_region="""<html><head><script type='application/ld+json'>{"@type":"Offer","itemOffered":{"@type":"Residence","address":{"@type":"PostalAddress","addressLocality":"Wróblowice","addressRegion":"Dolnośląskie"}}}</script><meta property='og:title' content='3 pokoje 50,79 m2'></head><body>Powierzchnia 50,79 m² Liczba pokoi: 3</body></html>"""
+rr=parse_detail(html_region,'https://www.olx.pl/d/oferta/x-CID3-IDabc.html','OLX','plot')
+assert rr.get('_structured_region')=='Dolnośląskie',rr
+
 f1=fingerprint('Działka Zdonia','Zdonia',1500,100000,'187/22');f2=fingerprint('Działka Zdonia','Zdonia',1500,90000,'187/22');assert f1==f2
 rows=[{'id':i,'canonical_url':f'https://x/{i}','category':'plot','plot_type':'budowlana','planning_status':'wydane WZ','area_m2':1500,'price_m2':p} for i,p in enumerate([40,45,50,55],1)]
 t={'id':99,'canonical_url':'https://x/t','category':'plot','plot_type':'budowlana','planning_status':'wydane WZ','area_m2':1500,'price_m2':35}
 conf={'scoring':{'minimum_comparables_for_deal_score':3,'deal_thresholds':{'mega':.65,'deal':.8,'good':.95,'market':1.1,'expensive':1.4}}}
 enrich_scores(t,rows,conf);assert t['median_comparable'] and t['comparable_count']>=3
-print('SELFTEST OK v1.5.2')
+print('SELFTEST OK v1.5.3')

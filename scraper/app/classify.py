@@ -58,6 +58,22 @@ def classify_category(title: str, url: str, text: str, category_hint: str | None
     # Text fallback uses land-specific phrases only. Bare ``grunt`` is deliberately
     # forbidden because it is common in fishing/agricultural-product vocabulary.
     x=asciifold((text or '')[:4500])
+
+    # Strong structured/page evidence for flats, houses or commercial units must win
+    # over a broad search/category hint. This fixes OLX results such as "3 pokoje
+    # 50,79 m²" that were discovered by a locality query and previously inherited
+    # the caller's `plot` hint.
+    non_plot_signals=[
+        "liczba pokoi", "rodzaj zabudowy", "poziom:", "pietro:",
+        "umeblowane:", "powierzchnia uzytkowa", "mieszkanie o powierzchni",
+        "lokal mieszkalny", "salon z aneksem", "sypialnia",
+    ]
+    if any(k in x for k in non_plot_signals):
+        # A genuine land advert can mention a future house/rooms in prose, therefore
+        # retain it only when the *title* itself clearly identifies land.
+        if not title_land:
+            return "other"
+
     strong_text_signals=[
         "powierzchnia dzialki", "powierzchnia gruntu", "numer dzialki",
         "dzialka budowl", "dzialka rol", "dzialka lesn", "dzialki budowl",
@@ -66,8 +82,8 @@ def classify_category(title: str, url: str, text: str, category_hint: str | None
     ]
     if any(k in x for k in strong_text_signals):
         return "plot"
-    # MPZP by itself is strong on property portals but should not rescue an arbitrary
-    # marketplace item unless the caller explicitly knows it came from a plot category.
+    # A category hint is now only a weak fallback and cannot override obvious
+    # apartment/building parameters above.
     if category_hint == "plot":
         return "plot"
     return "other"

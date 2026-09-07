@@ -3,7 +3,9 @@
   "name": "property-radar",
   "main": "src/index.js",
   "compatibility_date": "2026-09-05",
-  "observability": { "enabled": true },
+  "observability": {
+    "enabled": true
+  },
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -19,5 +21,10 @@
   "vars": {
     "GITHUB_REPO": "greminxd/Property_Radar_Cloud_v1.0.0",
     "SESSION_DAYS": "30"
+  },
+  "triggers": {
+    "crons": [
+      "7 7,8,18,19 * * *"
+    ]
   }
 }

@@ -88,7 +88,12 @@ KNOWN_BAD_URLS={
     'https://www.olx.pl/d/oferta/powierzchnia-300m2-CID3-ID1c2K6x.html':'rental-wrong-zakliczyn',
     'https://www.olx.pl/d/oferta/nowy-kolowrotek-samolla-ksn-8000-12-1-bb-karpiowy-surfcasting-1-sztuki-CID767-ID1ccuyw.html':'not-property',
     'https://www.olx.pl/d/oferta/nowy-kolowrotek-samolla-ksn-8000-12-1-bb-karpiowy-surfcasting-3-sztuki-CID767-ID1ccupp.html':'not-property',
+    'https://www.olx.pl/d/oferta/3-pokoje-50-79-m-balkon-6-16-m2-przetronne-CID3-ID1caVYu.html':'not-plot-wroblowice-dolnoslaskie',
+    'https://www.olx.pl/d/oferta/41-29-m-czystej-funkcjonalnosci-2-pok-41-29-m-balkon-6-16m-CID3-ID1caVYm.html':'not-plot-wroblowice-dolnoslaskie',
+    'https://www.olx.pl/d/oferta/sprzedam-dzialke-budowlana-olszyny-k-szczytna-12-100-CID3-ID1c86Zt.html':'outside-area-olszyny-warminsko-mazurskie',
+    'https://www.olx.pl/d/oferta/2-pokoje-41-29-m-balkon-6-16-m2-deweloperskie-blisko-wro-CID3-ID1caVYn.html':'not-plot-wroblowice-dolnoslaskie',
 }
+
 now=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
 for bad_url,bad_reason in KNOWN_BAD_URLS.items():
     d1('INSERT INTO listing_blacklist(canonical_url,reason,source,title,created_at) VALUES(?,?,?,?,?) ON CONFLICT(canonical_url) DO UPDATE SET reason=excluded.reason',[bad_url,bad_reason,'OLX',None,now])
@@ -102,7 +107,7 @@ for bad_url,bad_reason in KNOWN_BAD_URLS.items():
 # are physically removed. Users never need to paste SQL into D1 manually.
 try:
     sys.path.insert(0,str(ROOT/'scraper'))
-    from app.area import area_accepts
+    from app.area import area_accepts, target_region_accepts
     from app.classify import classify_category, olx_url_cid, is_rental_offer
     cfg=json.loads((ROOT/'scraper'/'config.json').read_text(encoding='utf-8'))
     area_cfg=cfg.get('area') or {}
@@ -115,6 +120,12 @@ try:
             why=KNOWN_BAD_URLS[row.get('canonical_url')]
         elif is_rental_offer(row.get('title') or '',row.get('description') or '','',row.get('canonical_url') or ''):
             why='rental-offer'
+        elif classify_category(row.get('title') or '',row.get('canonical_url') or '',row.get('description') or '',None)!='plot':
+            why='not-plot-reclassified'
+        if why is None:
+            region_ok,region_name,region_why=target_region_accepts(row.get('location'),None,row.get('description') or '')
+            if not region_ok:
+                why=f'{region_why}:{region_name}'
         if why is None:
             ok,_,area_why=area_accepts(row,area_cfg,None)
             if (not ok) and str(area_why or '').startswith(hard_prefixes):
@@ -126,7 +137,7 @@ try:
         chunk=bad[i:i+40]; qs=','.join('?' for _ in chunk)
         d1(f'DELETE FROM price_history WHERE listing_id IN ({qs})',chunk)
         d1(f'DELETE FROM listings WHERE id IN ({qs})',chunk)
-    maintenance='1.5.0-sale-only-cleanup-v4'
+    maintenance='1.5.3-region-category-cleanup-v1'
     now=__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
     d1("INSERT INTO system_state(key,value,updated_at) VALUES('db_maintenance_version',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",[maintenance,now])
     d1("INSERT INTO system_state(key,value,updated_at) VALUES('db_maintenance_last',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",[json.dumps({'version':maintenance,'checked_rows':len(rows),'deleted_rows':len(bad),'reasons':reasons,'finished_at':now},ensure_ascii=False),now])

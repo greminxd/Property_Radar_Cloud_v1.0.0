@@ -457,7 +457,14 @@ class Scraper:
         return clean_text(str(value))
 
     @classmethod
-    def _olx_params_lines(cls, offer: dict) -> list[str]:
+    def _olx_params_lines(cls, offer: dict, plot_context: bool=False) -> list[str]:
+        """Normalize OLX parameters without inventing a land category.
+
+        OLX reuses the machine key ``m`` for floor area on flats as well as area on
+        land adverts. v1.5.2 renamed every such value to ``Powierzchnia działki``;
+        that single label was enough to turn apartments into plots.  Until the offer
+        has independently passed the land gate, ``m`` stays neutral.
+        """
         lines=[]
         for p in offer.get('params') or []:
             if not isinstance(p,dict):
@@ -468,10 +475,14 @@ class Scraper:
             if not val:
                 # Some snapshots expose label directly on the parameter object.
                 val=cls._olx_value_text(p.get('label') or p.get('key'))
-            fold=(name+' '+key).lower().replace('ł','l')
-            if key=='m' or 'powierzch' in fold or 'area' in fold:
+            fld=(name+' '+key).lower().replace('ł','l')
+            if key=='m':
+                label='Powierzchnia działki' if plot_context else 'Powierzchnia'
+            elif any(x in fld for x in ('powierzchnia dzialki','powierzchnia gruntu','plot area','land area')):
                 label='Powierzchnia działki'
-            elif 'price' in fold and ('m2' in fold or 'm²' in fold):
+            elif 'powierzch' in fld or 'area' in fld:
+                label='Powierzchnia'
+            elif 'price' in fld and ('m2' in fld or 'm²' in fld):
                 label='Cena za m²'
             else:
                 label=name or key
@@ -490,7 +501,13 @@ class Scraper:
         if cid is not None and cid != 3:
             return False
         title=clean_text(str(offer.get('title') or ''))
-        params=' '.join(cls._olx_params_lines(offer))
+        params_lines=cls._olx_params_lines(offer,plot_context=False)
+        params=' '.join(params_lines)
+        pf=asciifold(params)
+        # Apartment/building attributes are a hard category contradiction. They are
+        # much stronger than the broad OLX real-estate CID3 or a locality search.
+        if any(x in pf for x in ('liczba pokoi','rodzaj zabudowy','poziom:','pietro:','umeblowane:','czynsz:')):
+            return False
         # Title + structured OLX parameters are trusted. Description is intentionally
         # excluded: phrases such as "wędkarstwo gruntowe" / "słona woda" caused
         # the old false positives.
@@ -505,7 +522,7 @@ class Scraper:
             lon=obj.get('lon',obj.get('lng',obj.get('longitude')))
             try:
                 lat=float(lat);lon=float(lon)
-                if 48.0<lat<51.5 and 18.0<lon<23.5:return lat,lon
+                if 48.0<lat<55.5 and 13.0<lon<24.8:return lat,lon
             except Exception: pass
             return None
         for key in ('map','geo','coordinates','location'):
@@ -573,7 +590,7 @@ class Scraper:
             price_label=clean_text(str(price_obj.get('label') or ''))
         elif isinstance(price_obj,(int,float)):
             price_value=float(price_obj)
-        params_lines=cls._olx_params_lines(offer)
+        params_lines=cls._olx_params_lines(offer,plot_context=True)
         created=clean_text(str(offer.get('created_time') or ''))
         refreshed=clean_text(str(offer.get('last_refresh_time') or offer.get('pushup_time') or ''))
         photo=''

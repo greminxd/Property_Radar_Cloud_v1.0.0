@@ -9,7 +9,7 @@ from playwright.async_api import async_playwright
 from app.cloud_db import CloudDB
 from app.scraper import Scraper
 from app.geocode import Geocoder
-from app.area import area_accepts
+from app.area import area_accepts, target_region_accepts
 from app.classify import classify_category, olx_url_cid, is_rental_offer
 from app.utils import haversine_km,fingerprint,asciifold
 from app.dates import normalize_published
@@ -19,13 +19,17 @@ from app.egib import EGIBResolver
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
-LISTING_PARSER_VERSION='1.5.2-radius-discovery-v1'
-DB_MAINTENANCE_VERSION='1.5.2-radius-cleanup-v1'
+LISTING_PARSER_VERSION='1.5.3-region-category-validation-v1'
+DB_MAINTENANCE_VERSION='1.5.3-region-category-cleanup-v1'
 KNOWN_BAD_URLS={
     'https://www.olx.pl/d/oferta/dzialka-budowlana-20km-od-krakowa-CID3-ID1c8sfW.html':'wrong-zakliczyn-myslenice',
     'https://www.olx.pl/d/oferta/powierzchnia-300m2-CID3-ID1c2K6x.html':'rental-wrong-zakliczyn',
     'https://www.olx.pl/d/oferta/nowy-kolowrotek-samolla-ksn-8000-12-1-bb-karpiowy-surfcasting-1-sztuki-CID767-ID1ccuyw.html':'not-property',
     'https://www.olx.pl/d/oferta/nowy-kolowrotek-samolla-ksn-8000-12-1-bb-karpiowy-surfcasting-3-sztuki-CID767-ID1ccupp.html':'not-property',
+    'https://www.olx.pl/d/oferta/3-pokoje-50-79-m-balkon-6-16-m2-przetronne-CID3-ID1caVYu.html':'not-plot-wroblowice-dolnoslaskie',
+    'https://www.olx.pl/d/oferta/41-29-m-czystej-funkcjonalnosci-2-pok-41-29-m-balkon-6-16m-CID3-ID1caVYm.html':'not-plot-wroblowice-dolnoslaskie',
+    'https://www.olx.pl/d/oferta/sprzedam-dzialke-budowlana-olszyny-k-szczytna-12-100-CID3-ID1c86Zt.html':'outside-area-olszyny-warminsko-mazurskie',
+    'https://www.olx.pl/d/oferta/2-pokoje-41-29-m-balkon-6-16-m2-deweloperskie-blisko-wro-CID3-ID1caVYn.html':'not-plot-wroblowice-dolnoslaskie',
 }
 
 def need(name):
@@ -122,6 +126,12 @@ async def run():
                     why=KNOWN_BAD_URLS[row.get('canonical_url')]
                 elif is_rental_offer(row.get('title') or '',row.get('description') or '','',row.get('canonical_url') or ''):
                     why='rental-offer'
+                elif classify_category(row.get('title') or '',row.get('canonical_url') or '',row.get('description') or '',category_hint=None)!='plot':
+                    why='not-plot-reclassified'
+                if why is None:
+                    region_ok,region_name,region_why=target_region_accepts(row.get('location'),None,row.get('description') or '')
+                    if not region_ok:
+                        why=f'{region_why}:{region_name}'
                 if why is None:
                     ok,_,area_why=area_accepts(row,area_cfg,row.get('distance_km'))
                     if (not ok) and str(area_why or '').startswith(hard_prefixes):
@@ -208,6 +218,16 @@ async def run():
             if 'zakliczyn' in scope_fold and any(x in scope_fold for x in ('powiat myslenick','gmina siepraw','kolo myslenic','okolice myslenic')):
                 batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'reason':'wrong Zakliczyn (Siepraw/Myślenice)'}); continue
 
+            # v1.5.3: validate province BEFORE any same-name geocoding. An explicit
+            # Dolnośląskie/Warmińsko-mazurskie/etc. is decisive and cannot be rescued
+            # by finding a Wróblowice/Olszyny namesake near Zakliczyn.
+            structured_region=r.get('_olx_region') or r.get('_structured_region') or ''
+            region_ok,region_name,region_reason=target_region_accepts(r.get('location'),structured_region,body)
+            if not region_ok:
+                batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'region':region_name,'reason':region_reason}); continue
+            if region_name:
+                r['area_confidence_region']=region_name
+
             # OLX Zakliczyn is ambiguous. Structured API coordinates are the strongest
             # evidence and are reused by both legacy whitelist and radius modes.
             olx_coords=None
@@ -223,6 +243,13 @@ async def run():
                     target_text=asciifold(str(r.get('title') or '')+' '+str(r.get('description') or '')+' '+body)
                     if not any(x in target_text for x in ('powiat tarnowsk','gmina zakliczyn','nad dunajcem','tarnow')):
                         batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'reason':'olx-ambiguous-zakliczyn-no-geo'}); continue
+                # A structured OLX city without either province or coordinates is
+                # still ambiguous (many Polish villages share names). Only explicit
+                # target administrative evidence may rescue it.
+                if r.get('_olx_structured_city') and not structured_region and olx_coords is None:
+                    target_text=asciifold(str(r.get('title') or '')+' '+str(r.get('description') or '')+' '+body)
+                    if not any(x in target_text for x in ('powiat tarnowsk','gmina zakliczyn','malopolsk')):
+                        batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'reason':'olx-city-without-region-or-geo'}); continue
 
             if radius_mode:
                 # v1.5.2: acceptance is no longer an arbitrary village whitelist. We
@@ -231,7 +258,7 @@ async def run():
                 coords=olx_coords
                 coord_source='olx-api' if coords else None
                 if coords is None and (r.get('location') or '').strip():
-                    coords=geocoder.geocode(str(r.get('location')))
+                    coords=geocoder.geocode(str(r.get('location')),structured_region)
                     if coords: coord_source='location-geocode'
                 if coords:
                     r['lat'],r['lon']=coords
@@ -264,7 +291,7 @@ async def run():
                 elif (area_cfg or {}).get('mode')!='locality_whitelist':
                     coords=geocoder.from_jsonld(jsonld)
                     if not coords and r.get('location'):
-                        coords=geocoder.geocode(r['location'])
+                        coords=geocoder.geocode(r['location'],structured_region)
 
                 if coords:
                     r['lat'],r['lon']=coords; r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],coords[0],coords[1])

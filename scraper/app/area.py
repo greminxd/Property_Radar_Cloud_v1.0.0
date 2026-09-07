@@ -89,6 +89,69 @@ def _configured_area(area_cfg: dict) -> tuple[list[str],list[str],list[str]]:
     return allowed,known_gmina,known_outside
 
 
+
+
+# Canonical Polish voivodeship names used only for explicit administrative validation.
+# The radar target (Bieśnik + 10 km) is entirely in Małopolskie, so a structured
+# foreign region is a hard reject and must never be "corrected" by geocoding a
+# same-named village in Małopolskie.
+_POLISH_VOIVODESHIPS = {
+    'dolnoslaskie':'dolnośląskie', 'kujawsko-pomorskie':'kujawsko-pomorskie',
+    'lubelskie':'lubelskie', 'lubuskie':'lubuskie', 'lodzkie':'łódzkie',
+    'malopolskie':'małopolskie', 'mazowieckie':'mazowieckie', 'opolskie':'opolskie',
+    'podkarpackie':'podkarpackie', 'podlaskie':'podlaskie', 'pomorskie':'pomorskie',
+    'slaskie':'śląskie', 'swietokrzyskie':'świętokrzyskie',
+    'warminsko-mazurskie':'warmińsko-mazurskie', 'wielkopolskie':'wielkopolskie',
+    'zachodniopomorskie':'zachodniopomorskie',
+}
+
+def normalize_voivodeship(value: str | None) -> str | None:
+    """Return a canonical Polish voivodeship when the value contains one."""
+    f=fold(value)
+    if not f:
+        return None
+    f=re.sub(r'\bwoj(?:ewodztwo)?\.?\s*','',f).strip(' ,.;:-')
+    for key,canonical in _POLISH_VOIVODESHIPS.items():
+        if re.search(rf'(?<![a-z]){re.escape(key)}(?![a-z])',f):
+            return canonical
+    return None
+
+def explicit_location_region(location: str | None, structured_region: str | None=None, text: str | None=None) -> str | None:
+    """Extract region only from strong location/admin evidence.
+
+    We intentionally do not scan arbitrary prose for bare region names. A listing may
+    mention another region in a comparison or directions. Structured ``addressRegion``
+    / OLX region wins; otherwise accept only explicit ``województwo ...`` or a compact
+    ``Lokalizacja: <city> <region>`` fragment.
+    """
+    reg=normalize_voivodeship(structured_region)
+    if reg:
+        return reg
+    loc=location or ''
+    reg=normalize_voivodeship(loc)
+    if reg:
+        return reg
+    t=fold((text or '')[:12000])
+    m=re.search(r'woj(?:ewodztwo)?\.?\s*[:\-]?\s*([a-z-]{4,30})',t,re.I)
+    if m:
+        reg=normalize_voivodeship(m.group(1))
+        if reg:
+            return reg
+    # OLX/rendered portals typically expose `Lokalizacja <city> Dolnośląskie`.
+    m=re.search(r'lokalizacja\s*[:\-]?\s*.{0,100}?\b('+'|'.join(map(re.escape,_POLISH_VOIVODESHIPS.keys()))+r')\b',t,re.I)
+    if m:
+        return normalize_voivodeship(m.group(1))
+    return None
+
+def target_region_accepts(location: str | None, structured_region: str | None=None, text: str | None=None, target: str='małopolskie') -> tuple[bool,str | None,str]:
+    reg=explicit_location_region(location,structured_region,text)
+    if not reg:
+        return True,None,'region-unresolved'
+    target_norm=normalize_voivodeship(target) or target
+    if fold(reg)!=fold(target_norm):
+        return False,reg,'explicit-outside-region'
+    return True,reg,'region-verified'
+
 def locality_record(name: str | None) -> dict | None:
     n=fold(name)
     if not n:return None

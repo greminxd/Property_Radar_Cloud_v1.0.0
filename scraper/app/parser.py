@@ -386,21 +386,35 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
     focused=clean_text(title+" "+desc[:4500]+" "+main_text[:6500])
     combined=clean_text(focused+" "+body[:8000])
 
-    price=_strong_price_from_soup(soup); structured_loc=""; published=""; updated=""
+    price=_strong_price_from_soup(soup); structured_loc=""; structured_region=""; published=""; updated=""
     for o in objs:
         if not isinstance(o,dict): continue
         offers=o.get("offers")
         if isinstance(offers,dict) and price is None:
             try: price=float(str(offers.get("price")).replace(" ",""))
             except Exception: pass
-        if not structured_loc:
-            addr=o.get("address")
+        # JSON-LD providers place PostalAddress in several shapes. OLX/Otodom may
+        # nest it under itemOffered, while other portals put it directly on the Offer.
+        # Read both; otherwise a foreign province can be lost before geo validation.
+        address_nodes=[o]
+        for key in ("itemOffered","mainEntity","location"):
+            node=o.get(key)
+            if isinstance(node,dict):
+                address_nodes.append(node)
+                nested=node.get("location")
+                if isinstance(nested,dict): address_nodes.append(nested)
+        for node in address_nodes:
+            addr=node.get("address") if isinstance(node,dict) else None
             if isinstance(addr,dict):
-                # addressLocality is intentionally first and should not be polluted by region name.
-                structured_loc=clean_text(str(addr.get("addressLocality") or ""))
                 if not structured_loc:
-                    structured_loc=clean_text(", ".join(str(addr.get(k,"")) for k in ["addressRegion"] if addr.get(k)))
-            elif isinstance(addr,str): structured_loc=clean_text(addr)
+                    # addressLocality is intentionally first and should not be polluted by region name.
+                    structured_loc=clean_text(str(addr.get("addressLocality") or ""))
+                    if not structured_loc:
+                        structured_loc=clean_text(", ".join(str(addr.get(k,"")) for k in ["addressRegion"] if addr.get(k)))
+                if not structured_region:
+                    structured_region=clean_text(str(addr.get("addressRegion") or ""))
+            elif isinstance(addr,str) and not structured_loc:
+                structured_loc=clean_text(addr)
         if not published: published=clean_text(str(o.get("datePosted") or o.get("datePublished") or ""))
         if not updated: updated=clean_text(str(o.get("dateModified") or ""))
 
@@ -474,13 +488,32 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
             archive_reason=marker; break
     source_status='archived' if archive_reason else 'active' 
 
-    # Alternate metadata can improve structured location.
+    # Alternate metadata can improve structured location / region.
     if not structured_loc:
         for meta in ["geo.placename","place:location:locality"]:
             v=_find_meta(soup,meta)
             if v:
                 structured_loc=v
                 break
+    if not structured_region:
+        for meta in ["geo.region","place:location:region"]:
+            v=_find_meta(soup,meta)
+            if v:
+                structured_region=v
+                break
+    # Detail pages from OLX and similar portals often render the province next to the
+    # locality even when JSON-LD omits addressRegion. Keep this as strong location
+    # metadata so a foreign Wróblowice/Olszyny cannot be geocoded to a local namesake.
+    if not structured_region:
+        cf=asciifold(combined[:12000])
+        regions=(
+            'dolnoslaskie','kujawsko-pomorskie','lubelskie','lubuskie','lodzkie',
+            'malopolskie','mazowieckie','opolskie','podkarpackie','podlaskie','pomorskie',
+            'slaskie','swietokrzyskie','warminsko-mazurskie','wielkopolskie','zachodniopomorskie'
+        )
+        rm=re.search(r'lokalizacja\s*[:\-]?\s*.{0,100}?\b('+'|'.join(map(re.escape,regions))+r')\b',cf,re.I)
+        if rm:
+            structured_region=rm.group(1)
     loc,loc_conf=_specific_locality(title,desc,structured_loc)
     if not loc:
         for p in LOCATION_PATTERNS:
@@ -504,6 +537,7 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
         "phone":phone, "parcel_number":parcel, "published_text":published[:100], "updated_text":updated[:100],
         "source_status":source_status, "archive_reason":archive_reason,
         "area_warning":awarn, "description":desc[:12000], "image_url":image,
+        "_structured_region":structured_region[:120] if structured_region else "",
         "_jsonld":objs, "_body":combined,
     }
 

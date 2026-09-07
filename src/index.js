@@ -210,10 +210,56 @@ function foldPublicText(v) {
   return String(v ?? '').toLowerCase().replace(/ł/g,'l').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
 }
 
+const WORKER_MAINTENANCE_VERSION='1.5.3-location-category-cleanup-v1';
+const KNOWN_BAD_LISTING_URLS={
+  'https://www.olx.pl/d/oferta/dzialka-budowlana-20km-od-krakowa-CID3-ID1c8sfW.html':'wrong-zakliczyn-myslenice',
+  'https://www.olx.pl/d/oferta/powierzchnia-300m2-CID3-ID1c2K6x.html':'rental-wrong-zakliczyn',
+  'https://www.olx.pl/d/oferta/nowy-kolowrotek-samolla-ksn-8000-12-1-bb-karpiowy-surfcasting-1-sztuki-CID767-ID1ccuyw.html':'not-property',
+  'https://www.olx.pl/d/oferta/nowy-kolowrotek-samolla-ksn-8000-12-1-bb-karpiowy-surfcasting-3-sztuki-CID767-ID1ccupp.html':'not-property',
+  'https://www.olx.pl/d/oferta/3-pokoje-50-79-m-balkon-6-16-m2-przetronne-CID3-ID1caVYu.html':'not-plot-wroblowice-dolnoslaskie',
+  'https://www.olx.pl/d/oferta/41-29-m-czystej-funkcjonalnosci-2-pok-41-29-m-balkon-6-16m-CID3-ID1caVYm.html':'not-plot-wroblowice-dolnoslaskie',
+  'https://www.olx.pl/d/oferta/sprzedam-dzialke-budowlana-olszyny-k-szczytna-12-100-CID3-ID1c86Zt.html':'outside-area-olszyny-warminsko-mazurskie',
+  'https://www.olx.pl/d/oferta/2-pokoje-41-29-m-balkon-6-16-m2-deweloperskie-blisko-wro-CID3-ID1caVYn.html':'not-plot-wroblowice-dolnoslaskie',
+};
+
+async function runWorkerMaintenance(env) {
+  try {
+    const current=await env.DB.prepare(`SELECT value FROM system_state WHERE key='worker_maintenance_version'`).first();
+    if(String(current?.value||'')===WORKER_MAINTENANCE_VERSION) return;
+  } catch {}
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS listing_blacklist (canonical_url TEXT PRIMARY KEY, reason TEXT, source TEXT, title TEXT, created_at TEXT NOT NULL)`).run();
+  const urls=Object.keys(KNOWN_BAD_LISTING_URLS), now=new Date().toISOString();
+  let rows=[];
+  if(urls.length){
+    const qs=urls.map(()=>'?').join(',');
+    rows=(await env.DB.prepare(`SELECT id,canonical_url,source,title FROM listings WHERE canonical_url IN (${qs})`).bind(...urls).all()).results||[];
+  }
+  const stmts=[];
+  for(const url of urls){
+    const row=rows.find(x=>x.canonical_url===url);
+    stmts.push(env.DB.prepare(`INSERT INTO listing_blacklist(canonical_url,reason,source,title,created_at) VALUES(?,?,?,?,?)
+      ON CONFLICT(canonical_url) DO UPDATE SET reason=excluded.reason,source=excluded.source,title=excluded.title,created_at=excluded.created_at`)
+      .bind(url,KNOWN_BAD_LISTING_URLS[url],row?.source||'OLX',row?.title||null,now));
+  }
+  const ids=rows.map(x=>Number(x.id)).filter(Number.isFinite);
+  if(ids.length){
+    const qs=ids.map(()=>'?').join(',');
+    stmts.push(env.DB.prepare(`DELETE FROM price_history WHERE listing_id IN (${qs})`).bind(...ids));
+  }
+  if(urls.length){
+    const qs=urls.map(()=>'?').join(',');
+    stmts.push(env.DB.prepare(`DELETE FROM listings WHERE canonical_url IN (${qs})`).bind(...urls));
+  }
+  stmts.push(env.DB.prepare(`INSERT INTO system_state(key,value,updated_at) VALUES('worker_maintenance_version',?,datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=datetime('now')`).bind(WORKER_MAINTENANCE_VERSION));
+  stmts.push(env.DB.prepare(`INSERT INTO system_state(key,value,updated_at) VALUES('worker_maintenance_last',?,datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=datetime('now')`).bind(JSON.stringify({version:WORKER_MAINTENANCE_VERSION,deleted_rows:rows.length,blocked_urls:urls.length,finished_at:now})));
+  if(stmts.length) await env.DB.batch(stmts);
+}
+
 function rejectLegacyPublicListing(r) {
   const url=String(r?.canonical_url||'');
-  if (url === 'https://www.olx.pl/d/oferta/dzialka-budowlana-20km-od-krakowa-CID3-ID1c8sfW.html' ||
-      url === 'https://www.olx.pl/d/oferta/powierzchnia-300m2-CID3-ID1c2K6x.html') return true;
+  if (KNOWN_BAD_LISTING_URLS[url]) return true;
   const title=foldPublicText(r?.title);
   const desc=foldPublicText(r?.description).slice(0,5000);
   const loc=foldPublicText(r?.area_locality||r?.location);
@@ -221,6 +267,11 @@ function rejectLegacyPublicListing(r) {
   const rentalDesc=/\b(oferta wynajmu|przedmiotem wynajmu|do wynajecia|na wynajem|cena wynajmu|czynsz)\b/.test(desc) ||
     /\b(?:zl|pln)\b.{0,18}\b(?:miesiecznie|za miesiac)\b/.test(desc);
   if (rentalTitle || rentalDesc) return true;
+  // Second safety net for rows created by an older parser: obvious apartments are
+  // never shown as plots even before a full scanner migration runs.
+  if (/\b(liczba pokoi|rodzaj zabudowy|umeblowane|mieszkanie o powierzchni|salon z aneksem|sypialni)\b/.test(`${title} ${desc}`)) return true;
+  // A foreign province in the stored location is a hard fail for this Małopolskie radar.
+  if (/\b(dolnoslaskie|warminsko-mazurskie|mazowieckie|wielkopolskie|pomorskie|zachodniopomorskie|lubelskie|lubuskie|lodzkie|opolskie|podlaskie|podkarpackie|slaskie|swietokrzyskie|kujawsko-pomorskie)\b/.test(loc)) return true;
   const genericZakliczyn=/\bzakliczyn\b/.test(loc) && !/\b(zdonia|slona|biesnik|konczyska|olszowa|palesnica|luslawice|wesolow)\b/.test(loc);
   const wrongZakliczyn=/zakliczyn(?:ie)?\s*[\/,;()\-]*\s*(?:kolo|okolice|k\.?)\s+myslenic|(?:kolo|okolice|k\.?)\s+myslenic|powiat\s+myslenick|(?:gmina|gm\.)\s+siepraw/.test(`${title} ${desc}`);
   return genericZakliczyn && wrongZakliczyn;
@@ -396,7 +447,10 @@ function statusLongText(s) {
     `🚫 Odrzucone ${s.last_scan?.rejected_count??'—'} • wygaszone ${s.last_scan?.deactivated_count??'—'}`,
     locValidation.registry_version?`🧭 Walidacja lokalizacji: <b>${escapeHtml(locValidation.registry_version)}</b>${locReasons?` • ${locReasons}`:''}`:'',
     dbMaintenance.version?`🧹 Auto-porządki D1: sprawdzono ${dbMaintenance.checked_rows||0} • usunięto <b>${dbMaintenance.deleted_rows||0}</b>`:'',
-    ``,`⏰ Następny automatyczny: <b>${s.next_scan}</b>`,`🧯 Ostatni błąd: ${escapeHtml(s.system?.last_error?.value||'brak')}`].filter(Boolean).join('\n');
+    ``,`☁️ Harmonogram: <b>Cloudflare Cron → GitHub Actions</b>`,
+    `⏰ Następny automatyczny: <b>${s.next_scan}</b>`,
+    s.system?.auto_scan_last_trigger?.value?`🕒 Ostatni trigger cron: ${plDate(s.system.auto_scan_last_trigger.value)} • ${escapeHtml(s.system?.auto_scan_last_result?.value||'—')}`:'',
+    `🧯 Ostatni błąd: ${escapeHtml(s.system?.last_error?.value||s.system?.auto_scan_last_error?.value||'brak')}`].filter(Boolean).join('\n');
 }
 
 function databaseStatusText(s) {
@@ -507,6 +561,47 @@ async function dispatchScan(env) {
 
   const detail=body&&typeof body==='object'?(body.message||JSON.stringify(body)):String(body||'');
   return {ok:false,code:'github_dispatch_failed',http_status:r.status,message:`GitHub API ${r.status}: ${detail.slice(0,350)}`};
+}
+
+function warsawScheduledClock(ms) {
+  const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Warsaw',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(new Date(ms));
+  const get=(k)=>Number(parts.find(x=>x.type===k)?.value||0);
+  return {year:get('year'),month:get('month'),day:get('day'),hour:get('hour'),minute:get('minute')};
+}
+
+async function runAutomaticScan(env, scheduledTime) {
+  // Cloudflare cron is UTC. Wrangler fires four DST-safe candidate hours; this
+  // local-time gate accepts only the intended 09:07 and 20:07 Europe/Warsaw slot.
+  const scheduled=Number(scheduledTime||Date.now());
+  const local=warsawScheduledClock(scheduled);
+  if(local.minute!==7 || ![9,20].includes(local.hour)) return {ok:true,skipped:true,reason:'dst-candidate-not-target-local-time'};
+
+  const st=await systemState(env);
+  const active=String(st.scan_status?.value||'idle');
+  if(['queued','running','cancelling'].includes(active)) {
+    await setSystemStates(env,{auto_scan_last_trigger:new Date(scheduled).toISOString(),auto_scan_last_result:`skipped-active:${active}`});
+    return {ok:true,skipped:true,reason:`scan-${active}`};
+  }
+  // Idempotency: retries or a manual scan started close to this slot must not create
+  // a duplicate Action run.
+  const lastRequest=Date.parse(st.scan_requested_at?.value||'')||0;
+  let lastFinished=0;
+  try {
+    const row=await env.DB.prepare(`SELECT finished_at FROM scan_runs ORDER BY id DESC LIMIT 1`).first();
+    lastFinished=Date.parse(row?.finished_at||'')||0;
+  } catch {}
+  if(Math.max(lastRequest,lastFinished)>Date.now()-70*60*1000) {
+    await setSystemStates(env,{auto_scan_last_trigger:new Date(scheduled).toISOString(),auto_scan_last_result:'skipped-recent-scan'});
+    return {ok:true,skipped:true,reason:'recent-scan'};
+  }
+
+  await setSystemStates(env,{auto_scan_last_trigger:new Date(scheduled).toISOString(),auto_scan_last_result:'dispatching'});
+  const d=await dispatchScan(env);
+  await setSystemStates(env,{
+    auto_scan_last_result:d.ok?'dispatched':`error:${d.code||d.http_status||'unknown'}`,
+    auto_scan_last_error:d.ok?'':String(d.message||'unknown error').slice(0,500)
+  });
+  return d;
 }
 
 async function githubRequest(env, path, options={}) {
@@ -724,6 +819,12 @@ async function handleApi(req, env, url) {
   const user = await authUser(req, env);
   if (!user) return json({ error: 'unauthorized' }, 401);
 
+  // v1.5.3 self-healing D1 cleanup: after deploying the Worker, simply opening
+  // the authenticated Mini App removes confirmed legacy false positives immediately.
+  if (['/api/me','/api/stats','/api/status','/api/listings'].includes(url.pathname)) {
+    try { await runWorkerMaintenance(env); } catch(e) { console.warn('worker maintenance',e?.message||e); }
+  }
+
   if (url.pathname === '/api/me') return json({ ok: true, user });
 
   if (url.pathname === '/api/stats') return json(await databaseStats(env));
@@ -818,5 +919,14 @@ export default {
       if (url.pathname.startsWith('/api/')) return json({ error: String(e?.message || e) }, 500);
       return new Response('Internal error', { status: 500 });
     }
+  },
+  async scheduled(controller, env, ctx) {
+    // Automatic scans are triggered by Cloudflare, not by the user's PC and not by
+    // GitHub's best-effort scheduler. GitHub Actions remains the scan executor.
+    ctx.waitUntil(runAutomaticScan(env,controller.scheduledTime).catch(async e=>{
+      console.error('automatic scan cron',e);
+      try { await setSystemStates(env,{auto_scan_last_result:'error',auto_scan_last_error:String(e?.message||e).slice(0,500)}); } catch {}
+      throw e;
+    }));
   },
 };

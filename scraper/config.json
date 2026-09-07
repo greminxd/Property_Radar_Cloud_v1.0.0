@@ -29,6 +29,8 @@
     "missing_scans_before_inactive": 3
   },
   "telegram": {
+    "coordinate_margin_km": 1.0,
+    "allow_locality_center_alerts": false,
     "new_alert_max_age_days": 3,
     "send_scan_summary": false,
     "price_change_alert": {

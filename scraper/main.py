@@ -8,7 +8,8 @@ from playwright.async_api import async_playwright
 
 from app.cloud_db import CloudDB
 from app.scraper import Scraper
-from app.geocode import Geocoder
+from app.geocode import Geocoder, geocode_query
+from app.reliability import alert_location_eligible, safe_to_age_source
 from app.area import area_accepts, target_region_accepts
 from app.classify import classify_category, olx_url_cid, is_rental_offer
 from app.utils import haversine_km,fingerprint,asciifold
@@ -19,7 +20,7 @@ from app.egib import EGIBResolver
 
 ROOT=Path(__file__).resolve().parent
 LOGS=ROOT.parent/'logs'; LOGS.mkdir(exist_ok=True)
-LISTING_PARSER_VERSION='1.5.3-region-category-validation-v1'
+LISTING_PARSER_VERSION='1.6.1-primary-entity-image-v2'
 DB_MAINTENANCE_VERSION='1.5.3-region-category-cleanup-v1'
 KNOWN_BAD_URLS={
     'https://www.olx.pl/d/oferta/dzialka-budowlana-20km-od-krakowa-CID3-ID1c8sfW.html':'wrong-zakliczyn-myslenice',
@@ -104,7 +105,7 @@ async def run():
     tg=TelegramNotify(os.getenv('TELEGRAM_BOT_TOKEN'),os.getenv('TELEGRAM_CHAT_IDS') or os.getenv('TELEGRAM_CHAT_ID'),os.getenv('PANEL_URL',''))
     scraper=Scraper(cfg); geocoder=Geocoder(db,cfg['center']); egib=EGIBResolver(db,cfg['center'])
     all_recs=[]; accepted=[]; rejected=[]; changes=[]; errs=[]; diagnostics=[]; healthy_sources=[]
-    area_cfg=cfg['area']
+    area_cfg={**cfg['area'],'fallback_radius_km':float(cfg['center']['radius_km'])}
     enabled=[x for x in cfg['sources'] if x.get('enabled',True)]
 
     # Automatic DB maintenance. No manual SQL is required after an upgrade.
@@ -257,8 +258,11 @@ async def run():
                 # locality, and keep it only if it is <= configured radius from Bieśnik.
                 coords=olx_coords
                 coord_source='olx-api' if coords else None
+                if coords is None and r.get('_listing_coords'):
+                    coords=r['_listing_coords']
+                    coord_source='listing-geo'
                 if coords is None and (r.get('location') or '').strip():
-                    coords=geocoder.geocode(str(r.get('location')),structured_region)
+                    coords=geocoder.geocode(geocode_query(r),structured_region)
                     if coords: coord_source='location-geocode'
                 if coords:
                     r['lat'],r['lon']=coords
@@ -267,7 +271,8 @@ async def run():
                     r['lat']=r['lon']=r['distance_km']=None
                 ok,_,confidence=area_accepts(r,area_cfg,r.get('distance_km'))
                 if not ok:
-                    batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':r.get('distance_km'),'reason':confidence}); continue
+                    reason=geocoder.last_reason if confidence=='radius-unresolved' else confidence
+                    batch_rejected.append({'url':r.get('canonical_url'),'title':r.get('title'),'location':r.get('location'),'distance_km':r.get('distance_km'),'reason':reason}); continue
                 r['area_locality']=r.get('location') or None
                 r['area_confidence']=f"{confidence}:{coord_source or 'none'}"
             else:
@@ -316,6 +321,7 @@ async def run():
                         if parcel.get('lat') is not None and parcel.get('lon') is not None:
                             r['lat']=float(parcel['lat']);r['lon']=float(parcel['lon'])
                             r['distance_km']=haversine_km(cfg['center']['lat'],cfg['center']['lon'],r['lat'],r['lon'])
+                            r['area_confidence']='radius-verified:egib-exact'
                 except Exception as e:
                     print(f"[EGIB] lookup warning {r.get('area_locality')} dz. {r.get('parcel_number')}: {type(e).__name__}: {e}",flush=True)
             # Exact cadastral coordinates, when available, are stronger than a village
@@ -415,7 +421,7 @@ async def run():
                         msg=f"{source['name']}: D1 persist {type(e).__name__}: {e}"
                         errs.append(msg); diag['persistence_error']=msg; diag['healthy']=False
                         print(f'[D1] warning: {msg}; skan pozostałych źródeł trwa dalej',flush=True)
-                if diag.get('healthy'): healthy_sources.append(source['name'])
+                if safe_to_age_source(diag): healthy_sources.append(source['name'])
                 diagnostics.append(diag)
 
                 async with state_lock:
@@ -468,7 +474,7 @@ async def run():
     fresh_new=0; meaningful_changes=0; notify=[]
     for rec,is_new,price_changed,old_price,reference_price in changes:
         r=byurl.get(rec['canonical_url'],rec)
-        if is_new and fresh_publication(r,now_utc,cfg):
+        if is_new and fresh_publication(r,now_utc,cfg) and alert_location_eligible(r,cfg):
             fresh_new+=1; notify.append((r,'new',None))
         # Price alert uses a persistent reference price, not only the immediately previous tiny edit.
         # Example: 300000 -> 299000 -> 295000 still alerts at 295000 because the cumulative change is 5000.
@@ -482,7 +488,7 @@ async def run():
                 meaningful_changes+=1;db.mark_meaningful_price_change(r['canonical_url'],ref,float(r['price']))
                 # Price changes stay in the database/history and can be opened manually,
                 # but production Telegram alerts are new-listing-only by default.
-                if cfg['telegram'].get('notify_price_changes',False):
+                if cfg['telegram'].get('notify_price_changes',False) and alert_location_eligible(r,cfg):
                     notify.append((r,'price',ref))
     # First bootstrap is allowed to notify only genuinely fresh publications, never old discoveries.
     for r,kind,old_price in notify:

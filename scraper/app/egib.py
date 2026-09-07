@@ -108,7 +108,7 @@ class EGIBResolver:
         parcel = _norm_parcel(parcel_number)
         if not locality or not parcel:
             return None
-        key = f'{_fold(locality)}|{parcel}'
+        key = f'v2-admin-verified|{_fold(locality)}|{parcel}'
         try:
             cached = self.db.parcel_cache_get(key)
         except Exception:
@@ -159,9 +159,11 @@ class EGIBResolver:
             # naming varies, hence folded substring checks rather than exact casing.
             if gmina and 'zakliczyn' not in _fold(gmina):
                 continue
-            if obreb and _fold(locality) not in _fold(obreb) and _fold(obreb) not in _fold(locality):
+            if not obreb or _fold(locality) != _fold(obreb):
                 continue
             parcel_id = f.get('id_dzialki') or f.get('ID_DZIALKI') or ''
+            if not re.match(r'^121614_[245]\.\d+\.',parcel_id):
+                continue
             xy = _coords(feature, (self.cx, self.cy))
             lat = lon = None
             if xy:

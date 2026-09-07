@@ -26,6 +26,7 @@ _BLOCK_MARKERS = (
 class Scraper:
     def __init__(self, cfg):
         self.cfg = cfg
+        self._blocked_hosts = {}
         self._http = requests.Session()
         self._http.headers.update({
             "User-Agent": (
@@ -124,9 +125,13 @@ class Scraper:
         return "plot"
 
     def _http_get_sync(self, url: str):
+        host=urlsplit(url).netloc
+        if host in self._blocked_hosts:
+            return self._blocked_hosts[host],url,'Portal odmówił dostępu. Dalsze próby w tym skanie wstrzymane.'
         timeout_s = float(self.cfg["browser"].get("http_timeout_s", 12))
         try:
             r = self._http.get(url, timeout=(5, timeout_s), allow_redirects=True)
+            if r.status_code in {403,429}: self._blocked_hosts[host]=r.status_code
             return r.status_code, r.url, r.text or ""
         except Exception as e:
             return 0, url, f"__HTTP_ERROR__ {type(e).__name__}: {e}"
@@ -150,7 +155,7 @@ class Scraper:
             # Retry only transport errors, throttling and server-side failures.
             if status==200:
                 break
-            if status not in {0,403,408,425,429,500,502,503,504}:
+            if status not in {0,408,425,500,502,503,504}:
                 break
         return (*last,history)
 
@@ -271,7 +276,7 @@ class Scraper:
                     continue
                 # The new collector deliberately does not scrape card CSS. One lightweight
                 # browser attempt may still expose __NEXT_DATA__ if raw HTTP was challenged.
-                if page_no==1 and source.get("browser_search_fallback",True):
+                if page_no==1 and source.get("browser_search_fallback",True) and status not in {403,429}:
                     context=None
                     try:
                         context=await browser.new_context(locale="pl-PL",user_agent=self._http.headers.get("User-Agent"))
@@ -374,7 +379,7 @@ class Scraper:
                 break
             print(f"       Otodom: szczegóły {min(i+detail_parallel,len(links))}/{len(links)}",flush=True)
 
-        healthy=bool(links and detail_ok and results and (next_data_pages or html_discovery_pages or browser_search_fallbacks))
+        healthy=bool(links and results and not errors and not blocked and not timeout_count and all(status==200 for status in statuses+detail_http_statuses))
         diag={
             "source":"Otodom",
             "search_pages_ok":next_data_pages,
@@ -387,6 +392,8 @@ class Scraper:
             "blocked":blocked,
             "failed_samples":failed,
             "healthy":healthy,
+            "coverage_complete":False,
+            "coverage_note":"Skan limitowany: brak dowodu kompletności; nie wygaszaj nieobecnych ofert.",
             "discovery_methods":(["next-data"] if next_data_pages else []) + (["html-links"] if html_discovery_pages else []) + (["browser-links/next-data"] if browser_search_fallbacks else []),
             "detail_methods":{"http-next-data":detail_ok,"browser":0},
             "http_statuses":statuses[-12:],
@@ -655,6 +662,9 @@ class Scraper:
         return rec
 
     def _http_json_get_sync(self, url: str):
+        host=urlsplit(url).netloc
+        if host in self._blocked_hosts:
+            return self._blocked_hosts[host],url,None,'Portal odmówił dostępu. Dalsze próby w tym skanie wstrzymane.'
         timeout_s=float(self.cfg['browser'].get('http_timeout_s',12))
         try:
             r=self._http.get(
@@ -662,6 +672,7 @@ class Scraper:
                 headers={'Accept':'application/json','Referer':'https://www.olx.pl/'},
             )
             text=r.text or ''
+            if r.status_code in {403,429}: self._blocked_hosts[host]=r.status_code
             data=None
             if r.status_code==200:
                 try: data=r.json()
@@ -682,7 +693,7 @@ class Scraper:
             last=await asyncio.to_thread(self._http_json_get_sync,url)
             status=last[0];history.append(status)
             if status==200: break
-            if status not in {0,403,408,425,429,500,502,503,504}: break
+            if status not in {0,408,425,500,502,503,504}: break
         return (*last,history)
 
     async def _collect_olx(self, browser, source):
@@ -828,7 +839,7 @@ class Scraper:
         # fallback: load the actual OLX result page, capture the JSON requests made by
         # OLX itself, and only if that yields nothing use the rendered offer links.
         # No CAPTCHA solving/stealth/proxying is used; a real challenge remains a block.
-        if (unresolved_queries or not results) and source.get('browser_session_fallback',True) and browser is not None:
+        if (unresolved_queries or not results) and source.get('browser_session_fallback',True) and browser is not None and not api_fail_fast:
             context=None
             response_tasks=[]
             captured=[]
@@ -993,13 +1004,15 @@ class Scraper:
         for rec in results:
             if rec and rec.get('canonical_url'): unique[rec['canonical_url']]=rec
         results=list(unique.values())
-        healthy=bool(results and (api_pages_ok or any(x==200 for x in html_statuses)))
+        healthy=bool(results and not errors and not unresolved_queries and not api_parse_failures and not api_fail_fast)
         diag={
             'source':'OLX','search_pages_ok':api_pages_ok + sum(1 for x in html_statuses if x==200),
             'discovered_links':len(set(seen_urls)|set(html_links)|set(browser_links)),'detail_pages_ok':len(results),
             'detail_pages_fetched':len(results),'listing_like':len(results),'records':len(results),
             'errors':len(errors),'blocked':sum(1 for x in api_statuses+html_statuses+fallback_detail_statuses+browser_api_statuses if x==403),
             'failed_samples':failed,'healthy':healthy,
+            'coverage_complete':False,
+            'coverage_note':'Skan limitowany: brak dowodu kompletności; nie wygaszaj nieobecnych ofert.',
             'discovery_methods':(['olx-api-v1'] if api_pages_ok else []) + (['olx-browser-session'] if (browser_api_pages_ok or browser_links) else []) + (['html-supplement'] if html_links else []),
             'detail_methods':{'api-records':api_records_ok,'browser-detail':browser_detail_ok,'http-fallback':max(0,len(results)-api_records_ok-browser_detail_ok)},
             'http_statuses':html_statuses[-12:],'api_statuses':api_statuses[-12:],

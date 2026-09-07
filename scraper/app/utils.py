@@ -38,6 +38,9 @@ def parse_number(text: str) -> float | None:
     return float(m.group()) if m else None
 
 
+PRICE_AMOUNT = r"(?:\d{1,3}(?:[ \xa0.]\d{3})+|\d{1,12})(?:[.,]\d{1,2})?"
+
+
 def parse_price(text: str) -> float | None:
     """Parse one PLN amount without swallowing an adjacent listing/offer number.
 
@@ -45,8 +48,7 @@ def parse_price(text: str) -> float | None:
     ``1.250.000 zł``. The former permissive regex could merge ``nr 15365 199 000 zł``
     into one absurd 15-billion value.
     """
-    amount = r"(?:\d{1,3}(?:[\s\xa0.]\d{3})+|\d{4,12}|\d{1,5}(?:[.,]\d{1,2})?|\d{1,3})"
-    m = re.search(rf"(?<!\d)({amount})\s*(?:zł|PLN)\b", text or "", re.I)
+    m = re.search(rf"(?<![\d.,])({PRICE_AMOUNT})\s*(?:zł|PLN)\b", text or "", re.I)
     if not m:
         return None
     raw = m.group(1).replace("\xa0", "").replace(" ", "").strip()

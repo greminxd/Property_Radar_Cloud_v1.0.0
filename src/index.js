@@ -830,6 +830,25 @@ async function handleApi(req, env, url) {
   if (url.pathname === '/api/stats') return json(await databaseStats(env));
   if (url.pathname === '/api/status') return json(await botStatus(env),200,{'Cache-Control':'no-store, no-cache, must-revalidate'});
 
+  const imageMatch = url.pathname.match(/^\/api\/listing\/(\d+)\/image$/);
+  if (imageMatch && req.method === 'GET') {
+    const listing=await env.DB.prepare(`SELECT image_url,canonical_url FROM listings WHERE id=?`).bind(Number(imageMatch[1])).first();
+    if(!listing?.image_url)return new Response('image unavailable',{status:404});
+    let remote;
+    try{remote=new URL(String(listing.image_url));}catch{return new Response('bad image url',{status:404});}
+    if(!['http:','https:'].includes(remote.protocol))return new Response('bad image url',{status:404});
+    const headers=new Headers({'Accept':'image/avif,image/webp,image/apng,image/*,*/*;q=0.8','User-Agent':'Mozilla/5.0 PropertyRadar/1.6.1'});
+    try{if(listing.canonical_url)headers.set('Referer',String(listing.canonical_url));}catch{}
+    let upstream;
+    try{upstream=await fetch(remote.toString(),{headers,redirect:'follow'});}catch{return new Response('image fetch failed',{status:404});}
+    if(!upstream.ok)return new Response('image fetch failed',{status:404});
+    const contentType=upstream.headers.get('content-type')||'image/jpeg';
+    if(!contentType.toLowerCase().startsWith('image/'))return new Response('not an image',{status:404});
+    const outHeaders=new Headers({'Content-Type':contentType,'Cache-Control':'private, max-age=21600','X-Content-Type-Options':'nosniff'});
+    const len=upstream.headers.get('content-length');if(len)outHeaders.set('Content-Length',len);
+    return new Response(upstream.body,{status:200,headers:outHeaders});
+  }
+
   if (url.pathname === '/api/listings') {
     // Mini App is plots-only. The feed must also work before the optional blacklist
     // migration has been run on an existing D1 database.

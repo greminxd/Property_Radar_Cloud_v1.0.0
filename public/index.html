@@ -4,10 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <meta name="robots" content="noindex,nofollow,noarchive" />
-  <meta name="theme-color" content="#071a1d" />
-  <meta name="color-scheme" content="dark" />
-  <title>Property Radar</title>
-  <link rel="stylesheet" href="/styles.css?v=1500" />
+  <meta name="theme-color" content="#f5f5ef" />
+  <meta name="color-scheme" content="light dark" />
+  <title>Działki · Property Radar</title>
+  <link rel="stylesheet" href="/styles.css?v=1610" />
+  <link rel="stylesheet" href="/workspace.css?v=1610" />
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -15,8 +16,8 @@
     <form id="loginForm" class="login-card panel">
       <div class="app-mark">PR</div>
       <span class="overline">PROPERTY RADAR</span>
-      <h1>Działki bez bałaganu.</h1>
-      <p>Prywatny podgląd ofert w promieniu 10 km od Bieśnika.</p>
+      <h1>Działki w okolicy</h1>
+      <p>Oferty sprzedaży i alerty z promienia 10 km od Bieśnika.</p>
       <input id="password" type="password" autocomplete="current-password" placeholder="Hasło panelu" required />
       <button type="submit" class="btn primary wide">Zaloguj</button>
       <div id="loginError" class="error"></div>
@@ -28,16 +29,18 @@
       <div class="topbar-inner">
         <div class="wordmark">
           <div class="app-mark small">PR</div>
-          <div><strong>Działki</strong><span>PROPERTY RADAR</span></div>
+          <div><strong>Działki<span class="brand-dot">.</span></strong><span>PROPERTY RADAR</span></div>
         </div>
         <div class="top-actions">
-          <span class="region-chip">Zakliczyn · okolice ≤10 km</span>
-          <button id="logoutBtn" class="icon-btn" title="Wyloguj">•••</button>
+          <span class="region-chip">Bieśnik · ≤10 km</span>
+          <button id="workspaceSettings" class="btn soft" aria-label="Dostosuj wygląd i sekcje">Dostosuj</button>
+          <button id="logoutBtn" class="icon-btn" title="Wyloguj" aria-label="Wyloguj">↪</button>
         </div>
       </div>
     </header>
 
     <main class="page">
+      <details id="scanSection" class="scan-section"><summary><span>◎ Centrum skanowania</span><span id="scanCompactStatus" role="status">Sprawdzam status…</span><span class="disclosure-arrow">⌄</span></summary>
       <section id="scanCommand" class="scan-panel panel">
         <div class="scan-top">
           <div class="scan-indicator"><i></i></div>
@@ -61,6 +64,7 @@
         </div>
         <details class="scan-details"><summary>Źródła i diagnostyka <span>›</span></summary><div id="scanSources" class="source-grid"></div></details>
       </section>
+      </details>
 
       <section class="summary-grid">
         <div class="metric panel"><small>Aktywne</small><b id="statActive">0</b><span>działek</span></div>
@@ -71,14 +75,14 @@
         <div class="metric panel"><small>Zablokowane</small><b id="statBlocked">0</b><span>błędnych URL</span></div>
       </section>
       <div id="lastScan" class="last-scan">Ostatni skan: —</div>
-
       <section class="browser panel">
         <div class="browser-heading">
-          <div><span class="overline">OFERTY</span><h2>Działki</h2></div>
+          <div><span class="overline">OFERTY</span><h2>Działki w okolicy</h2></div>
           <div class="result-count"><b id="resultCount">0</b><span>wyników</span></div>
         </div>
+        <div class="workspace-toolbar"><div class="segmented" role="group" aria-label="Zbiór ofert"><button data-collection="all" class="active" aria-pressed="true">Wszystkie</button><button data-collection="saved" aria-pressed="false">♡ Zapisane <span id="savedCount">0</span></button><button data-collection="hidden" aria-pressed="false">Ukryte <span id="hiddenCount">0</span></button></div><div class="view-switch" role="group" aria-label="Układ ofert"><button data-layout="grid" aria-label="Kafelki" aria-pressed="true">▦</button><button data-layout="list" aria-label="Lista" aria-pressed="false">☰</button></div></div>
         <div class="browser-top">
-          <div class="searchbox"><span>⌕</span><input id="search" placeholder="Miejscowość, numer działki, opis…" /></div>
+          <div class="searchbox"><span>⌕</span><input id="search" aria-label="Szukaj ofert" placeholder="Miejscowość, numer działki, opis…" /></div>
           <button id="filtersBtn" class="filter-btn">Filtry <b id="filterCount">0</b></button>
         </div>
         <div id="quickFilters" class="quick">
@@ -91,7 +95,7 @@
         </div>
         <div class="browser-foot">
           <span id="activePreset">• aktywne • dowolna data</span>
-          <select id="sort">
+          <select id="sort" aria-label="Sortowanie ofert">
             <option value="freshness" selected>Priorytet 7 → 30 dni</option>
             <option value="published">Najnowsze bez grup</option>
             <option value="updated">Ostatnio zmienione</option>
@@ -105,12 +109,12 @@
       </section>
 
       <section id="cards" class="cards"></section>
-      <div class="footer-note">Property Radar · prywatny feed działek · tylko sprzedaż</div>
+      <div class="footer-note">Property Radar 1.6.1 · Bieśnik · promień 10 km</div>
     </main>
 
-    <aside id="filters" class="drawer" aria-hidden="true">
+    <aside id="filters" class="drawer" aria-hidden="true" inert role="dialog" aria-modal="true" aria-label="Filtry ofert">
       <div class="drawer-handle"></div>
-      <div class="drawer-head"><div><span class="overline">FILTRY</span><strong>Wybierz dane</strong></div><button id="filtersClose" class="icon-btn">×</button></div>
+      <div class="drawer-head"><div><span class="overline">FILTRY</span><strong>Wybierz dane</strong></div><button id="filtersClose" class="icon-btn" aria-label="Zamknij filtry">×</button></div>
       <div class="drawer-body">
         <div class="filter-grid">
           <label>Status<select id="statusFilter"><option value="active">Aktywne</option><option value="all">Aktywne + archiwalne</option><option value="archived">Archiwalne</option></select></label>
@@ -138,8 +142,11 @@
 
     <dialog id="detailDialog" class="detail-dialog"><div class="sheet-handle"></div><button id="detailClose" class="detail-close">×</button><div id="detailBody"></div></dialog>
     <dialog id="rejectDialog" class="confirm-dialog"><div><div class="warn-icon">!</div><h3>Usunąć tę ofertę?</h3><p>Zniknie z D1 i trafi na blacklistę. Kolejny skan nie doda jej ponownie.</p><div class="confirm-actions"><button id="rejectCancel" class="btn soft">Anuluj</button><button id="rejectConfirm" class="btn danger solid">Usuń i zablokuj</button></div></div></dialog>
-    <div id="toast" class="toast"></div>
+    <dialog id="workspaceDialog" class="workspace-dialog" aria-labelledby="workspaceTitle"><div class="dialog-heading"><div><span class="overline">USTAWIENIA</span><h2 id="workspaceTitle">Widok aplikacji</h2></div><button class="icon-btn" data-close-workspace aria-label="Zamknij ustawienia">×</button></div><div class="settings-options"><label>Statystyki<input type="checkbox" data-section="metrics"></label><label>Centrum skanowania<input type="checkbox" data-section="scan"></label><label>Tryb ciemny<input id="darkTheme" type="checkbox"></label></div><button id="resetWorkspace" class="btn soft">Przywróć domyślny widok</button></dialog>
+    <dialog id="compareDialog" class="workspace-dialog compare-dialog" aria-labelledby="compareTitle"><div class="dialog-heading"><div><span class="overline">OBOK SIEBIE</span><h2 id="compareTitle">Porównaj działki</h2></div><button id="closeCompare" class="icon-btn" aria-label="Zamknij porównanie">×</button></div><div id="compareBody"></div></dialog>
+    <div id="compareTray" class="compare-tray hidden"><span><b id="compareCount">0</b>/3 wybrane</span><button id="openCompare" class="btn primary">Porównaj</button><button id="clearCompare" class="icon-btn" aria-label="Wyczyść porównanie">×</button></div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
   </div>
-  <script type="module" src="/app.js?v=1500"></script>
+  <script type="module" src="/app.js?v=1610"></script>
 </body>
 </html>

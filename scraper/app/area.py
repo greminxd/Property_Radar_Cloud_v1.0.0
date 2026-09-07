@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import math
 import re
 import unicodedata
 from functools import lru_cache
@@ -194,7 +195,7 @@ def _same_name_zakliczyn_guard(location: str | None, title: str | None, descript
     loc=fold(location)
     title_f=fold(title)
     desc_f=fold((description or '')[:1800])
-    combined=' '.join([title_f,desc_f])
+    combined=' '.join([loc,title_f,desc_f])
     # The guard matters only when the portal/location evidence is generic Zakliczyn.
     if 'zakliczyn' not in loc and 'zakliczyn' not in title_f:
         return None
@@ -302,14 +303,19 @@ def area_accepts(record: dict, area_cfg: dict, distance_km: float | None) -> tup
     # are not silently accepted. Keep the dedicated same-name Zakliczyn guard because
     # geocoding the bare word "Zakliczyn" could otherwise choose the wrong settlement.
     if mode == 'radius_verified':
+        region_ok,_,region_reason=target_region_accepts(record.get('location'),record.get('_structured_region') or record.get('_olx_region'))
+        if not region_ok:
+            return False,None,region_reason
         same_name_reject=_same_name_zakliczyn_guard(
-            record.get('location'),record.get('title'),record.get('description')
+            record.get('_structured_location') or record.get('location'),record.get('title'),record.get('description')
         )
         if same_name_reject:
             return False,None,same_name_reject
         max_d=float(area_cfg.get('fallback_radius_km', 0) or 0)
         if distance_km is None:
             return (not bool(area_cfg.get('reject_unknown_location',True))),None,'radius-unresolved'
+        if not math.isfinite(float(distance_km)) or float(distance_km)<0:
+            return False,None,'radius-invalid'
         if max_d <= 0:
             return True,None,'radius-verified-no-limit'
         return distance_km <= max_d,None,('radius-verified' if distance_km <= max_d else 'outside-radius')

@@ -12,9 +12,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - run: pip install beautifulsoup4==4.13.4 lxml==6.0.1 requests==2.32.5
+      - run: pip install -r scraper/requirements.txt
       - run: python scraper/selftest.py
+      - run: python -m unittest discover -s scraper -p "test_*.py" -v
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
       - run: node --check src/index.js
+      - run: node --check public/app.js && node --check public/workspace.js

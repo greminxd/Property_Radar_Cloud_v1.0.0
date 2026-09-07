@@ -1,79 +1,94 @@
 from __future__ import annotations
-import time, requests
+import re
+import time
+import requests
 from .utils import clean_text, haversine_km
-from .area import normalize_voivodeship
+from .area import normalize_voivodeship, fold
+from .listing_data import entity_coordinates, coordinate_pair
 
-KNOWN = {
-    "biesnik": (49.82625, 20.80990),
-}
+
+def geocode_query(record):
+    location = clean_text(record.get('_structured_location') or record.get('location'))
+    if not location:
+        return ''
+    evidence = fold(' '.join([record.get('title') or '', record.get('description') or '']))
+    for pattern, prefix in ((r'\bpowiat\s+([a-z-]+)', 'powiat '), (r'\b(?:gmina|gm\.)\s+([a-z-]+)', 'gmina ')):
+        matches = set(re.findall(pattern, evidence))
+        if len(matches) == 1:
+            location += ', ' + prefix + next(iter(matches))
+    return location
+
 
 class Geocoder:
     def __init__(self, db, center):
-        self.db=db; self.center=center
-        self.session=requests.Session()
-        self.session.headers["User-Agent"]="BiesnikNieruchomosciBot/1.0 (private local property monitor)"
-        self.last=0.0
+        self.db = db
+        self.center = center
+        self.session = requests.Session()
+        self.session.headers['User-Agent'] = 'PropertyRadar/1.6.1 (private property monitor)'
+        self.last = 0.0
+        self.last_reason = ''
 
     def from_jsonld(self, objs):
-        for o in objs:
-            if not isinstance(o,dict): continue
-            geo=o.get("geo")
-            if not geo and isinstance(o.get("location"),dict):
-                geo=(o.get("location") or {}).get("geo")
-            if isinstance(geo,dict):
-                try:
-                    lat=float(geo.get("latitude")); lon=float(geo.get("longitude"))
-                    # Whole Poland + small margin. Do not throw away a foreign point:
-                    # the radius validator needs the real coordinate to reject it.
-                    if 48.0 < lat < 55.5 and 13.0 < lon < 24.8: return lat,lon
-                except: pass
-        return None
+        return entity_coordinates(objs)
 
-    def geocode(self, location: str, region: str | None=None):
-        q=clean_text(location)
-        region=clean_text(region)
-        if not q: return None
-
-        # Never overwrite explicit source geography. v1.5.2 always appended
-        # `małopolskie`, so "Wróblowice, Dolnośląskie" reduced to Wróblowice and
-        # could be resolved to the same-named village near Zakliczyn.
-        query=q
-        explicit_region=normalize_voivodeship(region) or normalize_voivodeship(q)
-        if region and normalize_voivodeship(q) is None:
-            query += ", " + region
-        if explicit_region is None:
-            query += ", małopolskie"
-        if "polska" not in query.lower():
-            query += ", Polska"
-
-        # New cache namespace includes the actual query/context, so poisoned v1.5.2
-        # cache entries keyed only by a bare same-named locality are ignored.
-        cache_key="v2|"+clean_text(query)
-        cached=self.db.geocode_get(cache_key)
-        if cached: return cached["lat"],cached["lon"]
-
-        wait=max(0,1.05-(time.time()-self.last))
-        if wait: time.sleep(wait)
+    def geocode(self, location: str, region: str | None = None):
+        query = clean_text(location)
+        self.last_reason = 'location-missing'
+        if not query:
+            return None
+        if re.search(r'\bzakliczyn(?:ie|a)?\b',fold(query)) and not re.search(r'\b(?:powiat|gmina|gm\.|tarnowsk\w*|myslenick\w*|siepraw)\b',fold(query)):
+            self.last_reason = 'geocode-ambiguous'
+            return None
+        explicit_region = normalize_voivodeship(region) or normalize_voivodeship(query)
+        if explicit_region and not normalize_voivodeship(query):
+            query += ', ' + explicit_region
+        if 'polska' not in fold(query):
+            query += ', Polska'
+        cache_key = 'v3-unambiguous|' + fold(query)
+        cached = self.db.geocode_get(cache_key)
+        if cached:
+            coords = coordinate_pair(cached)
+            if coords:
+                self.last_reason = 'unique-locality-cache'
+                return coords
+        wait = max(0, 1.05 - (time.monotonic() - self.last))
+        if wait:
+            time.sleep(wait)
         try:
-            r=self.session.get(
-                "https://nominatim.openstreetmap.org/search",
-                params={"q":query,"format":"jsonv2","limit":5,"countrycodes":"pl"},
+            self.last = time.monotonic()
+            response = self.session.get(
+                'https://nominatim.openstreetmap.org/search',
+                params={'q': query, 'format': 'jsonv2', 'limit': 20, 'countrycodes': 'pl', 'addressdetails': 1, 'featuretype': 'settlement'},
                 timeout=12,
             )
-            self.last=time.time(); r.raise_for_status()
-            for item in r.json():
-                lat=float(item["lat"]); lon=float(item["lon"])
-                display=clean_text(item.get("display_name", ""))
-                result_region=normalize_voivodeship(display)
-                # If the source explicitly supplied a province, Nominatim must agree.
-                if explicit_region and result_region and normalize_voivodeship(explicit_region)!=normalize_voivodeship(result_region):
+            response.raise_for_status()
+            items = response.json()
+            if not isinstance(items, list) or len(items) >= 20:
+                self.last_reason = 'geocode-too-many-candidates'
+                return None
+            candidates = []
+            for item in items:
+                coords = coordinate_pair(item)
+                if not coords:
                     continue
-                d=haversine_km(self.center["lat"],self.center["lon"],lat,lon)
-                # Geocoder is only a candidate resolver for this local radar. Far-away
-                # same-name hits are never cached as a usable local coordinate.
-                if d <= 35:
-                    self.db.geocode_put(cache_key,lat,lon,display)
-                    return lat,lon
-        except Exception:
-            self.last=time.time()
-        return None
+                display = clean_text(item.get('display_name', ''))
+                result_region = normalize_voivodeship(display)
+                if explicit_region and result_region != explicit_region:
+                    continue
+                address = item.get('address') or {}
+                admin_text = fold(display + ' ' + ' '.join(str(value) for value in address.values()))
+                constraints = re.findall(r'\b(?:powiat|gmina)\s+([a-z-]+)', fold(query))
+                if any(not re.search(r'\b' + re.escape(value) + r'\b', admin_text) for value in constraints):
+                    continue
+                if not any(haversine_km(*coords, *candidate[0]) < 1 for candidate in candidates):
+                    candidates.append((coords, display))
+            if len(candidates) != 1:
+                self.last_reason = 'geocode-ambiguous' if candidates else 'geocode-no-match'
+                return None
+            coords, display = candidates[0]
+            self.db.geocode_put(cache_key, *coords, display)
+            self.last_reason = 'unique-locality'
+            return coords
+        except (requests.RequestException, ValueError, TypeError, KeyError):
+            self.last_reason = 'geocode-unavailable'
+            return None

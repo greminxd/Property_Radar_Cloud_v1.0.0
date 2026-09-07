@@ -1,9 +1,12 @@
 from __future__ import annotations
 import json, re
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from .utils import clean_text, parse_price, best_area, area_warning, phone_from_text, phone_candidates, canonical_url, asciifold
 from .classify import classify_category, classify_plot_type, planning_status, parcel_number
-from .area import registry_names, registry_outside_names
+from .area import registry_names, registry_outside_names, normalize_voivodeship
+from .listing_data import primary_entities, primary_payload, payload_entity, entity_coordinates
+from .utils import PRICE_AMOUNT
 
 # One canonical registry is shared by parser + area validator.  This avoids the old
 # drift where config.py/parser.py/area.py each knew a slightly different village list.
@@ -72,16 +75,16 @@ def _embedded_first(payloads, keys):
     return None
 
 def _embedded_price(payloads):
-    for keyset in [
-        ["totalPrice","priceValue","price"],
-        ["amount","value"],
-    ]:
-        v=_embedded_first(payloads,keyset)
-        if isinstance(v,dict): v=v.get('value') or v.get('amount')
-        try:
-            n=float(str(v).replace(' ','').replace('\xa0','').replace(',','.'))
-            if 100 <= n <= 1_000_000_000: return n
-        except Exception: pass
+    for payload in payloads:
+        for key in ('totalPrice','priceValue','price'):
+            value=payload.get(key)
+            if isinstance(value,dict):
+                if value.get('currency','PLN')!='PLN': continue
+                value=value.get('value',value.get('amount'))
+            try:
+                number=float(str(value).replace(' ','').replace('\xa0','').replace(',','.'))
+                if 100 <= number <= 1_000_000_000: return number
+            except (TypeError,ValueError): pass
     return None
 
 def _find_meta(soup, *names):
@@ -89,6 +92,70 @@ def _find_meta(soup, *names):
         tag=soup.find("meta", attrs={"property":name}) or soup.find("meta", attrs={"name":name})
         if tag and tag.get("content"): return clean_text(tag.get("content"))
     return ""
+
+def _image_url_from_value(value, base_url: str) -> str | None:
+    """Return one usable listing-photo URL from common schema/API shapes."""
+    if isinstance(value,str):
+        raw=clean_text(value)
+        if not raw or raw.startswith(('data:','blob:')): return None
+        try: candidate=urljoin(base_url,raw)
+        except Exception: return None
+        if not re.match(r'^https?://',candidate,re.I): return None
+        folded=asciifold(candidate)
+        if any(x in folded for x in ('logo','avatar','sprite','icon','favicon','placeholder','tracking','pixel')): return None
+        return candidate
+    if isinstance(value,list):
+        for item in value:
+            got=_image_url_from_value(item,base_url)
+            if got:return got
+        return None
+    if isinstance(value,dict):
+        for key in ('contentUrl','url','src','link','original','large','medium','imageUrl','photoUrl','thumbnailUrl'):
+            if key in value:
+                got=_image_url_from_value(value.get(key),base_url)
+                if got:return got
+        for item in value.values():
+            if isinstance(item,(dict,list)):
+                got=_image_url_from_value(item,base_url)
+                if got:return got
+    return None
+
+
+def _extract_listing_image(soup: BeautifulSoup, payloads, objs, base_url: str) -> str | None:
+    # Social metadata on listing pages almost always points at the main offer photo.
+    for meta in ('og:image:secure_url','og:image','twitter:image'):
+        got=_image_url_from_value(_find_meta(soup,meta),base_url)
+        if got:return got
+    # JSON-LD ImageObject / image arrays are the next strongest source.
+    for obj in objs or []:
+        if isinstance(obj,dict):
+            for key in ('image','photo','photos'):
+                if key in obj:
+                    got=_image_url_from_value(obj.get(key),base_url)
+                    if got:return got
+    # Main embedded payload from modern JS portals.
+    for payload in payloads or []:
+        for d in _walk_dicts(payload):
+            for key in ('imageUrl','photoUrl','photos','images','image','thumbnailUrl'):
+                if key in d:
+                    got=_image_url_from_value(d.get(key),base_url)
+                    if got:return got
+    # Last resort: visible listing-area images. Avoid page chrome and recommendation noise.
+    selectors='main img, article img, [data-testid*="gallery"] img, [data-cy*="gallery"] img, [class*="gallery"] img, [class*="Gallery"] img'
+    for tag in soup.select(selectors):
+        context=' '.join([str(tag.get('alt') or ''),str(tag.get('class') or ''),str(tag.get('id') or '')])
+        cf=asciifold(context)
+        if any(x in cf for x in ('logo','avatar','profil','icon','mapa','map','reklam','banner')): continue
+        candidates=[]
+        for attr in ('src','data-src','data-lazy-src','data-original'):
+            if tag.get(attr): candidates.append(tag.get(attr))
+        srcset=tag.get('srcset') or tag.get('data-srcset')
+        if srcset:
+            candidates.extend(part.strip().split(' ')[0] for part in str(srcset).split(',') if part.strip())
+        for candidate in reversed(candidates):
+            got=_image_url_from_value(candidate,base_url)
+            if got:return got
+    return None
 
 
 def _norm_phone(raw: str) -> str | None:
@@ -255,8 +322,7 @@ def _explicit_plot_area(text: str) -> tuple[float | None,str | None,str | None]:
 def _total_price_from_text(text: str) -> float | None:
     """Extract total PLN price while explicitly ignoring price-per-m² labels."""
     vals=[]
-    amount=r"(?:\d{1,3}(?:[\s\xa0.]\d{3})+|\d{4,12}|\d{1,5}(?:[.,]\d{1,2})?|\d{1,3})"
-    rx=re.compile(rf"(?<!\d)({amount})\s*(?:zł|PLN)\b",re.I)
+    rx=re.compile(rf"(?<![\d.,])({PRICE_AMOUNT})\s*(?:zł|PLN)\b",re.I)
     for m in rx.finditer(text or ''):
         before=asciifold((text or '')[max(0,m.start()-28):m.start()])
         after=asciifold((text or '')[m.end():m.end()+18])
@@ -301,28 +367,20 @@ def _price_m2_from_text(text: str) -> float | None:
 
 
 def _reconcile_price_fields(price: float | None, area: float | None, explicit_ppm: float | None):
-    """Return a self-consistent (total price, price/m²) pair.
-
-    Explicit portal ppm wins for the comparison metric. If a generic total-price
-    fallback accidentally captured a monthly instalment or ppm value, repair only
-    gross contradictions (>4x) using area * explicit ppm. Small differences are
-    normal portal rounding and leave the advertised total untouched.
-    """
+    """Preserve the asking price; compute comparable ppm from price and land area."""
     ppm=explicit_ppm if explicit_ppm and explicit_ppm > 0 else None
     if area and area > 0 and price and price > 0:
         derived=float(price)/float(area)
     else:
         derived=None
+    if derived is not None:
+        return price, derived
     if ppm is None:
         return price, derived
     if area and area > 0:
         expected=float(ppm)*float(area)
         if price is None or price <= 0:
             price=expected
-        elif expected > 0:
-            ratio=max(float(price),expected)/max(1.0,min(float(price),expected))
-            if ratio >= 4.0:
-                price=expected
     return price, ppm
 
 
@@ -369,29 +427,42 @@ def _sprzedajemy_date(soup: BeautifulSoup, text: str) -> str:
 
 def parse_detail(html: str, url: str, source: str, category_hint: str | None = None):
     soup=BeautifulSoup(html,"lxml")
-    objs=jsonld_objects(soup)
-    payloads=embedded_json_objects(soup)
+    objs=primary_entities(jsonld_objects(soup),url)
+    payload=primary_payload(embedded_json_objects(soup),url)
+    payloads=[payload] if payload else []
+    entity=payload_entity(payload)
+    if entity: objs.insert(0,entity)
+    for noise in soup.select('aside, footer, nav, [data-testid*="recommend"], [data-cy*="recommend"], [data-testid*="similar"], [data-cy*="similar"]'):
+        noise.decompose()
     body=clean_text(soup.get_text(" ", strip=True))
     meta_title=_find_meta(soup,"og:title","twitter:title") or clean_text((soup.title.string if soup.title else ""))
     h1=clean_text((soup.find("h1").get_text(" ",strip=True) if soup.find("h1") else ""))
     title=h1 if h1 and len(h1)>=8 else meta_title
+    if payload.get('title'): title=clean_text(str(payload['title']))
     main=soup.find("main") or soup.find("article")
     main_text=clean_text(main.get_text(" ",strip=True))[:9000] if main else body[:6000]
     desc=_find_meta(soup,"og:description","description")
+    description_node=soup.select_one('[data-cy="ad_description"], [data-testid="ad.description"], [data-testid="ad-description"]')
+    if payload.get('description'):
+        desc=clean_text(BeautifulSoup(str(payload['description']),'lxml').get_text(' ',strip=True))
+    elif description_node:
+        desc=clean_text(description_node.get_text(' ',strip=True))
     if not desc:
         desc=main_text[:8000] if main_text else body[:5000]
     # Keep core-field parsing tightly scoped to the listing itself. The old parser
     # searched up to 16k of the whole page and could steal a price/area from a
     # recommended listing below the actual offer (e.g. Morizon 3200 -> 14643 m²).
     focused=clean_text(title+" "+desc[:4500]+" "+main_text[:6500])
-    combined=clean_text(focused+" "+body[:8000])
+    combined=focused
 
-    price=_strong_price_from_soup(soup); structured_loc=""; structured_region=""; published=""; updated=""
+    price=None; structured_loc=""; structured_region=""; published=""; updated=""
     for o in objs:
         if not isinstance(o,dict): continue
-        offers=o.get("offers")
+        offers=o.get("offers") or (o if o.get('@type')=='Offer' else None)
         if isinstance(offers,dict) and price is None:
-            try: price=float(str(offers.get("price")).replace(" ",""))
+            try:
+                if offers.get('priceCurrency','PLN')=='PLN':
+                    price=float(str(offers.get("price")).replace(" ","").replace('\xa0','').replace(',','.'))
             except Exception: pass
         # JSON-LD providers place PostalAddress in several shapes. OLX/Otodom may
         # nest it under itemOffered, while other portals put it directly on the Offer.
@@ -419,12 +490,11 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
         if not updated: updated=clean_text(str(o.get("dateModified") or ""))
 
     if price is None: price=_embedded_price(payloads)
+    if price is None: price=_strong_price_from_soup(soup)
     # Total asking price and price/m² are different fields. Always exclude labelled
     # ppm values before falling back to the generic price parser.
     if price is None: price=_total_price_from_text(focused)
-    if price is None: price=_total_price_from_text(body[:4500])
     if price is None: price=parse_price(focused)
-    if price is None: price=parse_price(body[:4500])
 
     # Determine object type before choosing an area. A house page can contain both
     # 350 m² floor area and 37 000 m² parcel area; generic first/most-common-number
@@ -444,14 +514,10 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
     if strong_area is not None:
         area=strong_area
         awarn=None
-        # If the title itself explicitly advertises a plot area and structured data
-        # differs wildly, prefer the title. This catches portals that embed JSON-LD
-        # for recommended offers alongside the main listing.
         if title_area is not None:
             ratio=max(strong_area,title_area)/max(1,min(strong_area,title_area))
             if ratio>=1.5:
-                area=title_area
-                awarn=f"⚠️ Metraż skorygowany z danych strony ({strong_area:g} m²) wg tytułu ({title_area:g} m²)"
+                awarn=f"⚠️ Sprzeczny metraż: pole oferty {strong_area:g} m², tytuł {title_area:g} m². Zachowano pole oferty; sprawdź u sprzedającego."
     elif title_area is not None:
         area=title_area
         awarn=None
@@ -459,8 +525,11 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
         area,_=best_area(focused)
         awarn=area_warning(focused)
 
-    explicit_ppm=_price_m2_from_text(focused) or _price_m2_from_text(body[:7000])
+    explicit_ppm=_price_m2_from_text(focused)
     price,price_m2=_reconcile_price_fields(price,area,explicit_ppm)
+    if explicit_ppm and price_m2 and abs(price_m2-explicit_ppm)/max(price_m2,explicit_ppm)>0.05:
+        warning=f'⚠️ Cena/m² w opisie ({explicit_ppm:g}) różni się od ceny podzielonej przez powierzchnię ({price_m2:.2f}).'
+        awarn=' '.join(filter(None,[awarn,warning]))
     phone=_phone_from_soup(soup, desc+" "+body)
     if not published:
         v=_embedded_first(payloads,["datePosted","datePublished","publishedAt","createdAt","createdDate","creationDate"])
@@ -514,7 +583,8 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
         rm=re.search(r'lokalizacja\s*[:\-]?\s*.{0,100}?\b('+'|'.join(map(re.escape,regions))+r')\b',cf,re.I)
         if rm:
             structured_region=rm.group(1)
-    loc,loc_conf=_specific_locality(title,desc,structured_loc)
+    structured_region=structured_region or normalize_voivodeship(structured_loc) or ''
+    loc,loc_conf=_specific_locality(title,desc,structured_loc.split(',')[0].strip())
     if not loc:
         for p in LOCATION_PATTERNS:
             m=re.search(p,combined,re.I)
@@ -524,10 +594,7 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
     ptype=classify_plot_type(title,combined) if cat=="plot" else ("garaż" if cat=="garage" else "n/d")
     plan=planning_status(combined) if cat=="plot" else "n/d"
     parcel=parcel_number(combined) if cat=="plot" else None
-    image=_find_meta(soup,"og:image","twitter:image") or None
-    if not image:
-        iv=_embedded_first(payloads,["imageUrl","image","thumbnailUrl","photoUrl"])
-        if isinstance(iv,str) and iv.startswith("http"): image=iv
+    image=_extract_listing_image(soup,payloads,objs,url)
 
     return {
         "canonical_url": canonical_url(url,url), "source":source, "category":cat,
@@ -538,6 +605,10 @@ def parse_detail(html: str, url: str, source: str, category_hint: str | None = N
         "source_status":source_status, "archive_reason":archive_reason,
         "area_warning":awarn, "description":desc[:12000], "image_url":image,
         "_structured_region":structured_region[:120] if structured_region else "",
+        "_structured_location":structured_loc,
+        "_listing_coords":entity_coordinates(objs),
+        "_parser_source":"primary-payload" if payload else "primary-jsonld" if objs else "html",
+        "_area_source":strong_source,
         "_jsonld":objs, "_body":combined,
     }
 
@@ -555,7 +626,7 @@ def refine_from_rendered_text(rec: dict, visible_text: str) -> dict:
         return rec
     early=text[:9000]
     # Dynamic page fallback: recover the core listing fields from rendered text.
-    if rec.get("category")=="plot":
+    if rec.get("category")=="plot" and not rec.get('_area_source'):
         ta,_=best_area(rec.get("title") or "")
         if ta is not None and rec.get("area_m2"):
             try:

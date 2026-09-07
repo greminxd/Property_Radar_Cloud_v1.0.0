@@ -1,8 +1,9 @@
 {
   "name": "property-radar-cloud",
-  "version": "1.5.3",
+  "version": "1.6.1",
   "private": true,
   "scripts": {
+    "preview": "node scripts/preview.mjs",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev"
   },

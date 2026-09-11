@@ -24,7 +24,7 @@ class Geocoder:
         self.db = db
         self.center = center
         self.session = requests.Session()
-        self.session.headers['User-Agent'] = 'PropertyRadar/1.6.1 (private property monitor)'
+        self.session.headers['User-Agent'] = 'PropertyRadar/1.6.2 (private property monitor)'
         self.last = 0.0
         self.last_reason = ''
 

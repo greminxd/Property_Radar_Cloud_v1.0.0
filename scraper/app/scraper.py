@@ -839,7 +839,10 @@ class Scraper:
         # fallback: load the actual OLX result page, capture the JSON requests made by
         # OLX itself, and only if that yields nothing use the rendered offer links.
         # No CAPTCHA solving/stealth/proxying is used; a real challenge remains a block.
-        if (unresolved_queries or not results) and source.get('browser_session_fallback',True) and browser is not None and not api_fail_fast:
+        # api_fail_fast stops only further *bare HTTP* retries. It must NOT disable
+        # the browser-session fallback: a 403/429 from GitHub's requests client is
+        # exactly the case this fallback exists to recover from.
+        if (unresolved_queries or not results) and source.get('browser_session_fallback',True) and browser is not None:
             context=None
             response_tasks=[]
             captured=[]

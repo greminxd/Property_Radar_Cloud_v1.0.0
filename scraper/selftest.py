@@ -54,7 +54,7 @@ rr=parse_detail(html_region,'https://www.olx.pl/d/oferta/x-CID3-IDabc.html','OLX
 assert rr.get('_structured_region')=='Dolnośląskie',rr
 
 
-# 1.6.1: listing photos are preserved from the real advert metadata / payload.
+# 1.6.2: listing photos are preserved from the real advert metadata / payload.
 html_image='<html><head><meta property="og:image" content="https://cdn.example.com/listing/plot-123.jpg"><meta property="og:title" content="Działka Zdonia"><meta property="og:description" content="Powierzchnia działki 1200 m2. Cena 120 000 zł."></head><body><main><h1>Działka Zdonia</h1></main></body></html>'
 ri=parse_detail(html_image,'https://example.com/oferta/123','TEST','plot')
 assert ri.get('image_url')=='https://cdn.example.com/listing/plot-123.jpg',ri.get('image_url')
@@ -67,4 +67,4 @@ rows=[{'id':i,'canonical_url':f'https://x/{i}','category':'plot','plot_type':'bu
 t={'id':99,'canonical_url':'https://x/t','category':'plot','plot_type':'budowlana','planning_status':'wydane WZ','area_m2':1500,'price_m2':35}
 conf={'scoring':{'minimum_comparables_for_deal_score':3,'deal_thresholds':{'mega':.65,'deal':.8,'good':.95,'market':1.1,'expensive':1.4}}}
 enrich_scores(t,rows,conf);assert t['median_comparable'] and t['comparable_count']>=3
-print('SELFTEST OK v1.6.1')
+print('SELFTEST OK v1.6.2')

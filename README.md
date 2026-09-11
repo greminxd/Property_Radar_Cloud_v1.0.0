@@ -1,8 +1,8 @@
-# Property Radar 1.6.1 — Bieśnik + 10 km
+# Property Radar 1.6.2 — Bieśnik + 10 km
 
 Prywatny radar działek: Cloudflare Worker + D1, skaner Python/Playwright w GitHub Actions, panel WWW / Telegram Mini App.
 
-## 1.6.1 — panel nastawiony na oferty
+## 1.6.2 — panel nastawiony na oferty
 
 - Usunięto marketingowe/powitalne teksty z głównego widoku. Panel zaczyna się od skanu, statystyk i listy ofert.
 - Przywrócono informacyjne, szerokie karty: duże zdjęcie z oryginalnego ogłoszenia, bezpośredni link do portalu, cena, cena/m², metraż, data, odległość, typ, WZ/MPZP i numer działki.

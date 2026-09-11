@@ -128,7 +128,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,te
 }
 @media(prefers-reduced-motion:reduce) {html {scroll-behavior:auto}*,*::before,*::after {animation:none!important;transition:none!important}.card:hover {transform:none}}
 
-/* 1.6.1 — utility-first feed: keep the calmer palette, restore the information-dense two-column cards. */
+/* 1.6.2 — utility-first feed: keep the calmer palette, restore the information-dense two-column cards. */
 .page{padding-top:18px}
 .scan-section{margin-top:0}
 .browser{margin-top:18px}

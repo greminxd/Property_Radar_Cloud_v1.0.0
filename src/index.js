@@ -837,7 +837,7 @@ async function handleApi(req, env, url) {
     let remote;
     try{remote=new URL(String(listing.image_url));}catch{return new Response('bad image url',{status:404});}
     if(!['http:','https:'].includes(remote.protocol))return new Response('bad image url',{status:404});
-    const headers=new Headers({'Accept':'image/avif,image/webp,image/apng,image/*,*/*;q=0.8','User-Agent':'Mozilla/5.0 PropertyRadar/1.6.1'});
+    const headers=new Headers({'Accept':'image/avif,image/webp,image/apng,image/*,*/*;q=0.8','User-Agent':'Mozilla/5.0 PropertyRadar/1.6.2'});
     try{if(listing.canonical_url)headers.set('Referer',String(listing.canonical_url));}catch{}
     let upstream;
     try{upstream=await fetch(remote.toString(),{headers,redirect:'follow'});}catch{return new Response('image fetch failed',{status:404});}

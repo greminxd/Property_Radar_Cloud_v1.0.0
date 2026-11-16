@@ -58,9 +58,135 @@ function renderScan(){
   $('#scanNowBtn').disabled=!admin||running;
   $('#stopScanBtn').disabled=!admin||!['running','queued'].includes(name);
 }
-async function poll(force=false){try{const prev=scanStatus?.scan_state;scanStatus=await api('/api/status');renderScan();const running=['running','queued','cancelling'].includes(String(scanStatus.scan_state||'')),now=Date.now();if(force||(running&&now-listingsRefreshAt>5000)||(prev==='running'&&!running)){listingsRefreshAt=now;const d=await api('/api/listings');listings=d.listings||[];stats=d.stats||{};hydrateFilters();renderStats();render()}}catch(e){console.warn('poll',e)}}
-function startPolling(){if(pollTimer)clearInterval(pollTimer);poll();pollTimer=setInterval(()=>poll(),2500)}
-$('#refreshScanBtn').addEventListener('click',()=>poll(true));$('#scanNowBtn').addEventListener('click',async()=>{scanActionError='';renderScan();try{const d=await api('/api/scan',{method:'POST',body:'{}'});toast(d.message||'Skan zlecony');await poll()}catch(e){scanActionError=e.message||'Nie udało się uruchomić skanu';renderScan();toast(scanActionError)}});$('#stopScanBtn').addEventListener('click',async()=>{scanActionError='';try{await api('/api/scan/stop',{method:'POST',body:'{}'});toast('Zatrzymywanie skanu');await poll()}catch(e){scanActionError=e.message||'Nie udało się zatrzymać skanu';renderScan();toast(scanActionError)}});
+let pollInFlight = null;
+let pollingStarted = false;
+
+function isScanRunning(status = scanStatus) {
+    return ['running', 'queued', 'cancelling']
+        .includes(status?.scan_state);
+}
+
+function schedulePolling() {
+    clearTimeout(pollTimer);
+
+    if (!pollingStarted || document.hidden || !me) return;
+
+    pollTimer = setTimeout(
+        () => poll(),
+        isScanRunning() ? 2500 : 60000
+    );
+}
+
+async function poll(force = false) {
+    if (!me || document.hidden) return;
+
+    if (pollInFlight) {
+        await pollInFlight;
+        if (force) return poll(true);
+        return;
+    }
+
+    clearTimeout(pollTimer);
+
+    pollInFlight = (async () => {
+        try {
+            const wasRunning = isScanRunning();
+
+            scanStatus = await api('/api/status?light=1');
+            renderScan();
+
+            const running = isScanRunning();
+            const now = Date.now();
+
+            const scanChanged =
+                stats.last_scan?.finished_at !==
+                scanStatus.last_scan?.finished_at;
+
+            if (
+                force ||
+                scanChanged ||
+                (wasRunning && !running) ||
+                (running && now - listingsRefreshAt > 15000)
+            ) {
+                const d = await api('/api/listings');
+
+                listings = d.listings || [];
+                stats = d.stats || {};
+                listingsRefreshAt = Date.now();
+
+                hydrateFilters();
+                renderStats();
+                render();
+            }
+        } catch (e) {
+            console.warn('poll', e);
+        }
+    })();
+
+    try {
+        await pollInFlight;
+    } finally {
+        pollInFlight = null;
+        schedulePolling();
+    }
+}
+
+function startPolling() {
+    pollingStarted = true;
+
+    if (!scanStatus && !document.hidden) {
+        poll();
+    } else {
+        schedulePolling();
+    }
+}
+
+document.addEventListener('visibilitychange', () => {
+    clearTimeout(pollTimer);
+
+    if (!document.hidden && pollingStarted && me) {
+        poll();
+    }
+});
+
+$('#refreshScanBtn').addEventListener('click', () => poll(true));
+
+$('#scanNowBtn').addEventListener('click', async () => {
+    scanActionError = '';
+    renderScan();
+
+    try {
+        const d = await api('/api/scan', {
+            method: 'POST',
+            body: '{}'
+        });
+
+        toast(d.message || 'Skan zlecony');
+        await poll(true);
+    } catch (e) {
+        scanActionError = e.message || 'Nie udało się uruchomić skanu';
+        renderScan();
+        toast(scanActionError);
+    }
+});
+
+$('#stopScanBtn').addEventListener('click', async () => {
+    scanActionError = '';
+
+    try {
+        await api('/api/scan/stop', {
+            method: 'POST',
+            body: '{}'
+        });
+
+        toast('Zatrzymywanie skanu');
+        await poll(true);
+    } catch (e) {
+        scanActionError = e.message || 'Nie udało się zatrzymać skanu';
+        renderScan();
+        toast(scanActionError);
+    }
+});
 function uniq(k){return [...new Set(listings.map(x=>x[k]).filter(x=>x&&x!=='nieustalona'&&x!=='nieustalone'))].sort((a,b)=>String(a).localeCompare(String(b),'pl'))}
 function checks(id,vals,set){const e=$(id);e.innerHTML=vals.map(v=>`<label><input type="checkbox" value="${esc(v)}" ${set.has(v)?'checked':''}><span>${esc(v)}</span></label>`).join('')}
 function hydrateFilters(){checks('#localityFilters',[...new Set(listings.map(loc).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'pl')),state.localities);checks('#typeFilters',uniq('plot_type'),state.types);checks('#planningFilters',uniq('planning_status'),state.planning);checks('#sourceFilters',uniq('source'),state.sources)}

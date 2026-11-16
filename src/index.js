@@ -354,8 +354,14 @@ function nextScanLabel() {
   return 'jutro 09:07';
 }
 
-async function botStatus(env) {
-  let [db,st]=await Promise.all([databaseStats(env),systemState(env)]);
+async function botStatus(env, includeStats = true) {
+  let [db,st] = await Promise.all([
+    includeStats
+      ? databaseStats(env)
+      : env.DB.prepare('SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1')
+          .first().then(last_scan => ({ last_scan: last_scan || {} })),
+    systemState(env)
+  ]);
   // While a manual scan is queued/running, GitHub is the source of truth for the runner itself.
   // Syncing it here prevents the Mini App from being stuck on "queued" forever when Actions
   // fails before scraper/main.py has a chance to write to D1.
@@ -821,14 +827,18 @@ async function handleApi(req, env, url) {
 
   // v1.5.3 self-healing D1 cleanup: after deploying the Worker, simply opening
   // the authenticated Mini App removes confirmed legacy false positives immediately.
-  if (['/api/me','/api/stats','/api/status','/api/listings'].includes(url.pathname)) {
+  if (['/api/me','/api/stats','/api/listings'].includes(url.pathname)) {
     try { await runWorkerMaintenance(env); } catch(e) { console.warn('worker maintenance',e?.message||e); }
   }
 
   if (url.pathname === '/api/me') return json({ ok: true, user });
 
   if (url.pathname === '/api/stats') return json(await databaseStats(env));
-  if (url.pathname === '/api/status') return json(await botStatus(env),200,{'Cache-Control':'no-store, no-cache, must-revalidate'});
+  if (url.pathname === '/api/status') {
+    return json(await botStatus(env, url.searchParams.get('light') !== '1'), 200, {
+      'Cache-Control': 'no-store, no-cache, must-revalidate'
+    });
+  }
 
   const imageMatch = url.pathname.match(/^\/api\/listing\/(\d+)\/image$/);
   if (imageMatch && req.method === 'GET') {
